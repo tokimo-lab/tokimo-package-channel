@@ -47,6 +47,54 @@ jobs:
           repository: tokimo-lab/tokimo-package-web-fetch
           path: tokimo-package-web-fetch
 
+      # rust-client-api uses `[lints] workspace = true`. When checked out
+      # standalone it has no parent workspace, so cargo fails to resolve lints.
+      # This synthetic workspace root at $GITHUB_WORKSPACE lets rust-client-api
+      # walk up its directory tree and find the workspace it needs.
+      # channel/ and tokimo-package-web-fetch/ are excluded because they each
+      # have their own [workspace] root and must not be nested.
+      - name: Create synthetic workspace for rust-client-api lint resolution
+        shell: bash
+        run: |
+          cat > Cargo.toml << 'CARGO_EOF'
+          [workspace]
+          members = ["rust-client-api"]
+          exclude = ["channel", "tokimo-package-web-fetch"]
+          resolver = "2"
+
+          [workspace.lints.rust]
+          unsafe_code     = "warn"
+          unused_must_use = "deny"
+
+          [workspace.lints.clippy]
+          all                       = { level = "warn", priority = -1 }
+          pedantic                  = { level = "warn", priority = -1 }
+          wildcard_imports          = "allow"
+          module_name_repetitions   = "allow"
+          must_use_candidate        = "allow"
+          missing_errors_doc        = "allow"
+          missing_panics_doc        = "allow"
+          items_after_statements    = "allow"
+          struct_excessive_bools    = "allow"
+          similar_names             = "allow"
+          many_single_char_names    = "allow"
+          unnecessary_literal_bound = "allow"
+          doc_markdown              = "allow"
+          ref_option                = "allow"
+          fn_params_excessive_bools = "allow"
+          needless_pass_by_value    = "allow"
+          cast_possible_wrap        = "allow"
+          cast_possible_truncation  = "allow"
+          cast_precision_loss       = "allow"
+          cast_sign_loss            = "allow"
+          unwrap_in_result          = "warn"
+          panic                     = "warn"
+          todo                      = "warn"
+          dbg_macro                 = "warn"
+          print_stdout              = "warn"
+          print_stderr              = "warn"
+          CARGO_EOF
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -88,6 +136,48 @@ jobs:
         with:
           repository: tokimo-lab/tokimo-package-web-fetch
           path: tokimo-package-web-fetch
+
+      - name: Create synthetic workspace for rust-client-api lint resolution
+        shell: bash
+        run: |
+          cat > Cargo.toml << 'CARGO_EOF'
+          [workspace]
+          members = ["rust-client-api"]
+          exclude = ["channel", "tokimo-package-web-fetch"]
+          resolver = "2"
+
+          [workspace.lints.rust]
+          unsafe_code     = "warn"
+          unused_must_use = "deny"
+
+          [workspace.lints.clippy]
+          all                       = { level = "warn", priority = -1 }
+          pedantic                  = { level = "warn", priority = -1 }
+          wildcard_imports          = "allow"
+          module_name_repetitions   = "allow"
+          must_use_candidate        = "allow"
+          missing_errors_doc        = "allow"
+          missing_panics_doc        = "allow"
+          items_after_statements    = "allow"
+          struct_excessive_bools    = "allow"
+          similar_names             = "allow"
+          many_single_char_names    = "allow"
+          unnecessary_literal_bound = "allow"
+          doc_markdown              = "allow"
+          ref_option                = "allow"
+          fn_params_excessive_bools = "allow"
+          needless_pass_by_value    = "allow"
+          cast_possible_wrap        = "allow"
+          cast_possible_truncation  = "allow"
+          cast_precision_loss       = "allow"
+          cast_sign_loss            = "allow"
+          unwrap_in_result          = "warn"
+          panic                     = "warn"
+          todo                      = "warn"
+          dbg_macro                 = "warn"
+          print_stdout              = "warn"
+          print_stderr              = "warn"
+          CARGO_EOF
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
