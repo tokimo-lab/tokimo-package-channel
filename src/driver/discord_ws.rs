@@ -311,10 +311,19 @@ fn handle_dispatch(event_type: &str, data: Option<&Value>, channel_id: Uuid, emi
     }
     let Some(d) = data else { return };
     // Skip bot echoes to avoid self-reply loops.
-    if d.get("author").and_then(|a| a.get("bot")).and_then(Value::as_bool).unwrap_or(false) {
+    if d.get("author")
+        .and_then(|a| a.get("bot"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
         return;
     }
-    let content = d.get("content").and_then(Value::as_str).unwrap_or("").trim().to_string();
+    let content = d
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
     if content.is_empty() {
         return;
     }

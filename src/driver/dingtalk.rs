@@ -235,9 +235,9 @@ impl InboundDriver for DingtalkDriver {
         external_thread_id: &str,
         text: &str,
     ) -> Result<(), ChannelError> {
-        let (_, session_webhook) = external_thread_id
-            .split_once('|')
-            .ok_or_else(|| ChannelError::Other("dingtalk external_thread_id missing sessionWebhook; cannot reply".into()))?;
+        let (_, session_webhook) = external_thread_id.split_once('|').ok_or_else(|| {
+            ChannelError::Other("dingtalk external_thread_id missing sessionWebhook; cannot reply".into())
+        })?;
         if session_webhook.is_empty() {
             return Err(ChannelError::Other("dingtalk sessionWebhook is empty".into()));
         }

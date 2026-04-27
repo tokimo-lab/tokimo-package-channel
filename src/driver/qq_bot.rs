@@ -158,12 +158,7 @@ impl QqBotDriver {
 
     /// POST a v2 message envelope, returning the decoded API response. Honours
     /// the platform's `code != 0` error semantics even on HTTP 200.
-    async fn post_v2_message(
-        &self,
-        cfg: &QqBotConfig,
-        path: &str,
-        body: &Value,
-    ) -> Result<Value, ChannelError> {
+    async fn post_v2_message(&self, cfg: &QqBotConfig, path: &str, body: &Value) -> Result<Value, ChannelError> {
         let token = self.access_token(cfg).await?;
         let url = format!("{QQ_BOT_API_BASE}{path}");
         let resp = self
@@ -272,20 +267,25 @@ impl QqBotDriver {
         let path = format!("/v2/users/{}/stream_messages", urlencoding::encode(user_openid));
         tracing::info!(
             "[qq_chunk] send reply_msg_id={} idx={} state={} text_len={} stream_msg_id={:?} msg_seq={}",
-            reply_msg_id, index, state.as_i32(), accumulated_text.len(), stream_msg_id, msg_seq
+            reply_msg_id,
+            index,
+            state.as_i32(),
+            accumulated_text.len(),
+            stream_msg_id,
+            msg_seq
         );
         let resp = match self.post_v2_message(cfg, &path, &body).await {
             Ok(r) => {
-                tracing::info!(
-                    "[qq_chunk] resp reply_msg_id={} idx={} body={}",
-                    reply_msg_id, index, r
-                );
+                tracing::info!("[qq_chunk] resp reply_msg_id={} idx={} body={}", reply_msg_id, index, r);
                 r
             }
             Err(e) => {
                 tracing::warn!(
                     "[qq_chunk] FAIL reply_msg_id={} idx={} state={} err={}",
-                    reply_msg_id, index, state.as_i32(), e
+                    reply_msg_id,
+                    index,
+                    state.as_i32(),
+                    e
                 );
                 return Err(e);
             }
@@ -305,11 +305,7 @@ impl QqBotDriver {
                     .and_then(Value::as_str)
                     .map(str::to_string)
             })
-            .or_else(|| {
-                resp.get("stream_msg_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            });
+            .or_else(|| resp.get("stream_msg_id").and_then(Value::as_str).map(str::to_string));
 
         {
             let mut sessions = self.reply_sessions.lock().expect("reply sessions poisoned");
@@ -405,10 +401,7 @@ pub(crate) async fn fetch_access_token(
     let token = parsed
         .access_token
         .ok_or_else(|| ChannelError::Other(format!("missing access_token in response: {body}")))?;
-    let expire_secs = parsed
-        .expires_in
-        .map_or(7200, StringOrInt::into_u64)
-        .saturating_sub(60);
+    let expire_secs = parsed.expires_in.map_or(7200, StringOrInt::into_u64).saturating_sub(60);
     Ok(CachedToken {
         token,
         expires_at: Instant::now() + std::time::Duration::from_secs(expire_secs),
@@ -472,10 +465,7 @@ impl ChannelDriver for QqBotDriver {
     }
 
     fn connectivity_probes(&self, _config: &Value) -> Vec<(String, u16)> {
-        vec![
-            ("api.sgroup.qq.com".to_string(), 443),
-            ("bots.qq.com".to_string(), 443),
-        ]
+        vec![("api.sgroup.qq.com".to_string(), 443), ("bots.qq.com".to_string(), 443)]
     }
 }
 
@@ -637,7 +627,9 @@ impl InboundDriver for QqBotDriver {
         // chats fall back to a buffered one-shot send.
         let streaming_ok = scene == "c2c" && !external_thread_id.is_empty();
         if !streaming_ok {
-            return self.drain_stream_as_oneshot(config, external_user_id, external_thread_id, rx).await;
+            return self
+                .drain_stream_as_oneshot(config, external_user_id, external_thread_id, rx)
+                .await;
         }
 
         let reply_msg_id = external_thread_id.to_string();
@@ -704,7 +696,10 @@ impl InboundDriver for QqBotDriver {
             let (send_text, is_terminal) = pending.take().expect("pending set above");
             tracing::info!(
                 "[qq_drv] chunk recv reply_msg_id={} text_len={} is_done={} last_sent_len={}",
-                reply_msg_id, send_text.len(), is_terminal, last_sent.len()
+                reply_msg_id,
+                send_text.len(),
+                is_terminal,
+                last_sent.len()
             );
             if send_text == last_sent && !is_terminal {
                 tracing::info!("[qq_drv] skip duplicate chunk reply_msg_id={}", reply_msg_id);

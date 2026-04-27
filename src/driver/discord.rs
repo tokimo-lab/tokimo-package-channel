@@ -177,7 +177,14 @@ impl InboundDriver for DiscordDriver {
         let cancel_child = cancel.clone();
         let http = self.client.clone();
 
-        let task = tokio::spawn(discord_ws::run(http, bot_token, intents, channel_id, emit, cancel_child));
+        let task = tokio::spawn(discord_ws::run(
+            http,
+            bot_token,
+            intents,
+            channel_id,
+            emit,
+            cancel_child,
+        ));
         Ok(PumpHandle { cancel, task })
     }
 

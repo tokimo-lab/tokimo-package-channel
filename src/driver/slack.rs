@@ -171,13 +171,7 @@ impl InboundDriver for SlackDriver {
 
         let url = format!("{SLACK_API_BASE}/chat.postMessage");
         let body = json!({ "channel": external_thread_id, "text": text });
-        let resp = self
-            .client
-            .post(&url)
-            .bearer_auth(bot_token)
-            .json(&body)
-            .send()
-            .await?;
+        let resp = self.client.post(&url).bearer_auth(bot_token).json(&body).send().await?;
         let status = resp.status().as_u16();
         let resp_body = resp.text().await.unwrap_or_default();
         if !(200..300).contains(&status) {

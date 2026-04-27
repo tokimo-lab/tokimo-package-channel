@@ -38,8 +38,8 @@ use async_trait::async_trait;
 use axum::http::HeaderMap;
 use base64::Engine;
 use bytes::Bytes;
-use chrono::Utc;
 use cbc::Decryptor;
+use chrono::Utc;
 use quick_xml::events::Event;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -293,7 +293,9 @@ fn decrypt_aes(encrypted_b64: &str, aes_key: &[u8; 32]) -> Result<(String, Strin
     }
 
     // Strip PKCS#7 padding.
-    let pad = *buf.last().ok_or_else(|| ChannelError::Other("empty decrypted buffer".into()))? as usize;
+    let pad = *buf
+        .last()
+        .ok_or_else(|| ChannelError::Other("empty decrypted buffer".into()))? as usize;
     if pad == 0 || pad > 32 || pad > buf.len() {
         return Err(ChannelError::Other(format!("invalid padding: {pad}")));
     }
@@ -439,7 +441,15 @@ impl InboundDriver for WecomDriver {
         let (plaintext_xml, _receive_id) = decrypt_aes(&encrypt, &aes_key)?;
         let fields = extract_xml_fields(
             &plaintext_xml,
-            &["MsgType", "Content", "FromUserName", "ToUserName", "MsgId", "AgentID", "CreateTime"],
+            &[
+                "MsgType",
+                "Content",
+                "FromUserName",
+                "ToUserName",
+                "MsgId",
+                "AgentID",
+                "CreateTime",
+            ],
         );
 
         let msg_type = fields.get("MsgType").map_or("", String::as_str);

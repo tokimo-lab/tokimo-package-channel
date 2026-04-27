@@ -364,7 +364,10 @@ fn parse_event(event_type: &str, d: &Value, channel_id: Uuid) -> Option<InboundE
 
 fn parse_c2c_message(d: &Value, channel_id: Uuid) -> Option<InboundEvent> {
     let message_id = d.get("id").and_then(Value::as_str)?.to_string();
-    let openid = d.get("author").and_then(|a| a.get("user_openid")).and_then(Value::as_str)?;
+    let openid = d
+        .get("author")
+        .and_then(|a| a.get("user_openid"))
+        .and_then(Value::as_str)?;
     let content = d.get("content").and_then(Value::as_str).unwrap_or("").trim();
     if content.is_empty() {
         return None;
