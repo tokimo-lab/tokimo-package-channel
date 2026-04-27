@@ -150,9 +150,9 @@ impl InboundDriver for TelegramBotDriver {
         _headers: &HeaderMap,
         _body: Bytes,
     ) -> Result<WebhookOutcome, ChannelError> {
-        // Webhook mode is not implemented yet. Prefer pump for dev.
+        // Inbound uses long-poll pump (start_pump). Telegram webhook push is not implemented.
         Err(ChannelError::Unsupported(
-            "telegram_bot uses long-poll; webhook mode not yet implemented".into(),
+            "telegram_bot uses long-poll pump; webhook push mode is not implemented".into(),
         ))
     }
 
