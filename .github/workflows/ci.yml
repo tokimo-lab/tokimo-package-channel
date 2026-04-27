@@ -19,18 +19,46 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
+      # Checkout this repo to a named subdirectory so path deps resolve correctly.
+      # The layout mirrors the monorepo: channel/ rust-client-api/ tokimo-package-web-fetch/
       - uses: actions/checkout@v4
+        with:
+          path: channel
+
+      # rust-client-api lives in the main monorepo (not a standalone repo).
+      # Sparse-checkout just that package, then move it to the expected sibling path.
+      - uses: actions/checkout@v4
+        with:
+          repository: tokimo-lab/tokimo
+          sparse-checkout: packages/rust-client-api
+          sparse-checkout-cone-mode: true
+          filter: blob:none
+          path: tokimo-main
+
+      - name: Place rust-client-api at expected path
+        shell: bash
+        run: mv tokimo-main/packages/rust-client-api rust-client-api
+
+      # rust-client-api depends on tokimo-package-web-fetch via path dep.
+      - uses: actions/checkout@v4
+        with:
+          repository: tokimo-lab/tokimo-package-web-fetch
+          path: tokimo-package-web-fetch
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: channel
 
       - name: cargo build
+        working-directory: channel
         run: cargo build --lib --bins --tests
 
       - name: cargo test
+        working-directory: channel
         run: cargo test --lib --bins
 
   lint:
@@ -38,6 +66,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: channel
+
+      - uses: actions/checkout@v4
+        with:
+          repository: tokimo-lab/tokimo
+          sparse-checkout: packages/rust-client-api
+          sparse-checkout-cone-mode: true
+          filter: blob:none
+          path: tokimo-main
+
+      - name: Place rust-client-api at expected path
+        shell: bash
+        run: mv tokimo-main/packages/rust-client-api rust-client-api
+
+      - uses: actions/checkout@v4
+        with:
+          repository: tokimo-lab/tokimo-package-web-fetch
+          path: tokimo-package-web-fetch
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -46,9 +93,13 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: channel
 
       - name: cargo fmt
+        working-directory: channel
         run: cargo fmt --all -- --check
 
       - name: cargo clippy
+        working-directory: channel
         run: cargo clippy --lib --bins --tests -- -D warnings
