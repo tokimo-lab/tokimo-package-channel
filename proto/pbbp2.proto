@@ -1,0 +1,35 @@
+// Feishu / Lark WebSocket long-connection wire format.
+//
+// Ported from the `pbbp2.proto` used by `larksuite/oapi-sdk-go`:
+//   https://github.com/larksuite/oapi-sdk-go/blob/main/ws/pbbp2.pb.go
+//
+// Binary WebSocket frames exchanged over the long-connection are a protobuf
+// encoding of the `Frame` message. Proto2 required fields are preserved here
+// to match the Go SDK's on-the-wire layout byte-for-byte — prost encodes
+// `required` fields unconditionally even when default, which matches Feishu's
+// expectations.
+
+syntax = "proto2";
+
+package pbbp2;
+
+message Header {
+  required string key = 1;
+  required string value = 2;
+}
+
+// Top-level frame. `method` is the `FrameType` (0=control, 1=data). `headers`
+// carry metadata like `type` (event/card/ping/pong), `message_id`, `sum`,
+// `seq`, `trace_id`. `payload` is the JSON-encoded event body for data frames
+// or the JSON `ClientConfig` for control/pong frames.
+message Frame {
+  required uint64 SeqID = 1;
+  required uint64 LogID = 2;
+  required int32 service = 3;
+  required int32 method = 4;
+  repeated Header headers = 5;
+  optional string payload_encoding = 6;
+  optional string payload_type = 7;
+  optional bytes payload = 8;
+  optional string LogIDNew = 9;
+}

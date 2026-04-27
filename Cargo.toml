@@ -1,0 +1,47 @@
+[package]
+name = "tokimo-channel"
+version = "0.1.0"
+edition = "2024"
+description = "Bidirectional channel abstraction for Tokimo – outbound notifications + inbound event ingress (Feishu, WeCom, Telegram, Email, Webhook, …)"
+build = "build.rs"
+
+[lib]
+name = "tokimo_channel"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = "0.1"
+axum = { version = "0.8", features = ["json"] }
+base64 = "0.22"
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3"
+hmac = "0.13"
+http = "1"
+prost = { version = "0.14", features = ["derive"] }
+reqwest = { version = "0.13", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+jsonc-parser = { version = "0.32", features = ["serde"] }
+sha1 = "0.11"
+sha2 = "0.11"
+ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
+hex = "0.4"
+aes = { version = "0.8", default-features = false }
+cbc = { version = "0.1", features = ["alloc", "block-padding"] }
+quick-xml = "0.36"
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
+tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
+tokio-util = "0.7"
+tracing = "0.1"
+url = "2"
+urlencoding = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+rust-client-api = { path = "../rust-client-api" }
+
+[build-dependencies]
+prost-build = "0.14"
+
+[lints]
+workspace = true
