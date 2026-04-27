@@ -4,17 +4,17 @@ Bidirectional channel abstraction for Tokimo — outbound notifications + inboun
 
 ## Supported platforms
 
-| Platform | Outbound | Inbound (WebSocket) |
-|----------|----------|---------------------|
-| Feishu / Lark | ✓ | ✓ |
-| DingTalk | ✓ | ✓ |
-| WeCom | ✓ | — |
-| Telegram | ✓ | — |
-| Slack | ✓ | ✓ |
-| Discord | ✓ | ✓ |
-| QQ Bot | ✓ | ✓ |
-| Webhook | ✓ | — |
-| Weclaw | ✓ | — |
+| Platform | Outbound | Inbound | Inbound mechanism |
+|----------|----------|---------|-------------------|
+| Feishu / Lark | ✓ | ✓ | WebSocket long-connection |
+| DingTalk | ✓ | ✓ | WebSocket (Stream Mode) |
+| WeCom | ✓ | ✓ | HTTPS webhook callback |
+| Telegram | ✓ | ✓ | Long-poll (`getUpdates`) |
+| Slack | ✓ | ✓ | WebSocket (Socket Mode) |
+| Discord | ✓ | ✓ | WebSocket (Gateway v10) |
+| QQ Bot | ✓ | ✓ | WebSocket gateway |
+| Webhook | ✓ | — | — |
+| Weclaw | ✓ | ✓ | Long-poll (`getupdates`) |
 
 ## Usage
 
