@@ -78,6 +78,7 @@ rust-client-api = { path = "../rust-client-api" }
 
 [build-dependencies]
 prost-build = "0.14"
+protoc-bin-vendored = "3"
 
 [lints]
 workspace = true
