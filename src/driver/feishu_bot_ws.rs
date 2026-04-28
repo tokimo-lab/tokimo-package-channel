@@ -389,6 +389,7 @@ pub(crate) struct ParsedEvent {
 /// Returns None for events we do not forward (e.g. card callbacks, empty text,
 /// unsupported event types). Filtering by chat_type / mentions is done by the
 /// caller based on the returned [`ParsedEvent`] metadata.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn parse_event_payload(
     payload: &[u8],
     channel_id: Uuid,

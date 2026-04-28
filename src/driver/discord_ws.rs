@@ -128,6 +128,7 @@ type WsSink = Arc<
     >,
 >;
 
+#[allow(clippy::too_many_lines)]
 async fn connect_and_pump(
     url: &str,
     bot_token: &str,

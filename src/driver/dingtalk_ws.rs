@@ -187,6 +187,7 @@ async fn connect_and_pump(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn handle_frame(frame: &Value, channel_id: Uuid, emit: &InboundEmitter, writer: &WsSink) {
     let frame_type = frame.get("type").and_then(Value::as_str).unwrap_or("");
     let headers = frame.get("headers").cloned().unwrap_or(Value::Null);

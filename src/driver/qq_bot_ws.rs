@@ -177,6 +177,7 @@ async fn sleep_or_cancel(dur: Duration, cancel: &CancellationToken) {
 
 // ── Single connection lifecycle ──────────────────────────────────────────────
 
+#[allow(clippy::too_many_lines)]
 async fn connect_and_pump(
     gateway_url: &str,
     access_token: &str,
