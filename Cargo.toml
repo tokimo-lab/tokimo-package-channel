@@ -68,7 +68,7 @@ cbc = { version = "0.1", features = ["alloc", "block-padding"] }
 quick-xml = "0.36"
 thiserror = "2"
 tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
-tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 tokio-util = "0.7"
 tracing = "0.1"
 url = "2"
