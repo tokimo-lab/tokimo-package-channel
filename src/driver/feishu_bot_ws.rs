@@ -608,6 +608,10 @@ pub(crate) async fn run(
         bot_open_id: Mutex::new(None),
     });
 
+    // Defensive: in test / embedding contexts that bypass `ChannelHub::new`,
+    // ensure the rustls crypto provider is installed before we dial wss://.
+    crate::install_default_crypto_provider();
+
     // Resolve bot open_id up-front so group filtering works on the very first
     // event. Failure is non-fatal: we fall back to forwarding all events.
     let _ = ctx.ensure_bot_open_id().await;
@@ -633,7 +637,11 @@ pub(crate) async fn run(
             }
         };
 
-        info!(%channel_id, "feishu_bot ws connecting");
+        let host = url::Url::parse(&endpoint.url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_else(|| "<unknown>".into());
+        info!(%channel_id, host = %host, "feishu_bot ws connecting [v2 with 15s timeout]");
         let connected = connect_and_pump(&endpoint, &ctx, &emit, &cancel).await;
         backoff = Duration::from_secs(2); // reset on (attempted) connect
 
@@ -684,15 +692,19 @@ async fn connect_and_pump(
         .into_client_request()
         .map_err(|e| ChannelError::Other(format!("build ws request: {e}")))?;
 
-    let (ws, resp) = match tokio_tungstenite::connect_async(request).await {
-        Ok(v) => v,
-        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
-            return Err(handshake_error(*resp));
-        }
-        Err(e) => {
-            return Err(ChannelError::Other(format!("ws dial failed: {e}")));
-        }
-    };
+    let (ws, resp) =
+        match tokio::time::timeout(Duration::from_secs(15), tokio_tungstenite::connect_async(request)).await {
+            Ok(Ok(v)) => v,
+            Ok(Err(tokio_tungstenite::tungstenite::Error::Http(resp))) => {
+                return Err(handshake_error(*resp));
+            }
+            Ok(Err(e)) => {
+                return Err(ChannelError::Other(format!("ws dial failed: {e}")));
+            }
+            Err(_) => {
+                return Err(ChannelError::Other("ws dial timed out after 15s".into()));
+            }
+        };
     info!(%channel_id, status = %resp.status(), "feishu_bot ws connected");
 
     let (writer, mut reader) = ws.split();

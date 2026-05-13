@@ -64,6 +64,10 @@ impl ChannelHub {
     /// store (used by pumps that refresh their own credentials, e.g. WeClaw).
     #[must_use]
     pub fn new(http_client: reqwest::Client, config_store: Arc<dyn ChannelConfigStore>) -> Arc<Self> {
+        // Pin rustls' crypto provider once before any WS driver dials out —
+        // see `install_default_crypto_provider` for why this matters.
+        crate::install_default_crypto_provider();
+
         let mut drivers: HashMap<String, Arc<dyn ChannelDriver>> = HashMap::new();
 
         let feishu = Arc::new(FeishuDriver::new(http_client.clone()));
