@@ -44,6 +44,7 @@ use crate::inbound::{InboundDriver, InboundEmitter, InboundEvent, PumpHandle, We
 use crate::template::RenderedMessage;
 
 const FEISHU_API_BASE: &str = "https://open.feishu.cn";
+const STREAMING_ELEMENT_ID: &str = "md_streaming";
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -195,6 +196,127 @@ impl FeishuBotDriver {
         if status != 200 {
             warn!(%status, %body, "feishu_bot reaction failed");
             return Err(ChannelError::ChannelRejected { status, body });
+        }
+        Ok(())
+    }
+
+    /// POST cardkit/v1/cards — create a streaming card and return its card_id.
+    async fn create_streaming_card(&self, cfg: &FeishuBotConfig, initial_text: &str) -> Result<String, ChannelError> {
+        let token = self.tenant_token(cfg).await?;
+        let url = format!("{FEISHU_API_BASE}/open-apis/cardkit/v1/cards");
+        let card_json = serde_json::to_string(&json!({
+            "schema": "2.0",
+            "config": { "streaming_mode": true, "update_multi": true },
+            "body": {
+                "elements": [
+                    { "tag": "markdown", "element_id": STREAMING_ELEMENT_ID, "content": initial_text }
+                ]
+            }
+        }))
+        .map_err(|e| ChannelError::Other(format!("encode card: {e}")))?;
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&token)
+            .json(&json!({ "type": "card_json", "data": card_json }))
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        if status != 200 {
+            return Err(ChannelError::ChannelRejected { status, body });
+        }
+        let parsed: Value =
+            serde_json::from_str(&body).map_err(|e| ChannelError::Other(format!("decode cardkit response: {e}")))?;
+        let code = parsed.get("code").and_then(Value::as_i64).unwrap_or(0);
+        if code != 0 {
+            return Err(ChannelError::ChannelRejected {
+                status,
+                body: format!("code={code} body={body}"),
+            });
+        }
+        parsed
+            .get("data")
+            .and_then(|d| d.get("card_id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| ChannelError::Other("missing card_id in cardkit response".into()))
+    }
+
+    /// PUT cardkit/v1/cards/{card_id}/elements/{element_id}/content — update streaming content.
+    async fn update_card_content(
+        &self,
+        cfg: &FeishuBotConfig,
+        card_id: &str,
+        element_id: &str,
+        content: &str,
+        sequence: i32,
+    ) -> Result<(), ChannelError> {
+        let token = self.tenant_token(cfg).await?;
+        let url = format!("{FEISHU_API_BASE}/open-apis/cardkit/v1/cards/{card_id}/elements/{element_id}/content");
+        let resp = self
+            .client
+            .put(&url)
+            .bearer_auth(&token)
+            .json(&json!({
+                "uuid": Uuid::new_v4().to_string(),
+                "content": content,
+                "sequence": sequence,
+            }))
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        if status != 200 {
+            return Err(ChannelError::ChannelRejected { status, body });
+        }
+        if let Ok(parsed) = serde_json::from_str::<Value>(&body) {
+            let code = parsed.get("code").and_then(Value::as_i64).unwrap_or(0);
+            if code != 0 {
+                return Err(ChannelError::ChannelRejected {
+                    status,
+                    body: format!("code={code} body={body}"),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// PATCH cardkit/v1/cards/{card_id}/settings — disable streaming_mode.
+    async fn close_card_streaming(
+        &self,
+        cfg: &FeishuBotConfig,
+        card_id: &str,
+        sequence: i32,
+    ) -> Result<(), ChannelError> {
+        let token = self.tenant_token(cfg).await?;
+        let url = format!("{FEISHU_API_BASE}/open-apis/cardkit/v1/cards/{card_id}/settings");
+        let settings = serde_json::to_string(&json!({ "config": { "streaming_mode": false } }))
+            .map_err(|e| ChannelError::Other(format!("encode settings: {e}")))?;
+        let resp = self
+            .client
+            .patch(&url)
+            .bearer_auth(&token)
+            .json(&json!({
+                "uuid": Uuid::new_v4().to_string(),
+                "sequence": sequence,
+                "settings": settings,
+            }))
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        if status != 200 {
+            return Err(ChannelError::ChannelRejected { status, body });
+        }
+        if let Ok(parsed) = serde_json::from_str::<Value>(&body) {
+            let code = parsed.get("code").and_then(Value::as_i64).unwrap_or(0);
+            if code != 0 {
+                return Err(ChannelError::ChannelRejected {
+                    status,
+                    body: format!("code={code} body={body}"),
+                });
+            }
         }
         Ok(())
     }
@@ -370,5 +492,156 @@ impl InboundDriver for FeishuBotDriver {
         // Fallback: no chat_id — DM the sender by open_id.
         self.post_message(&cfg, "open_id", sender_open_id, "interactive", &card)
             .await
+    }
+
+    async fn reply_to_user_streaming(
+        &self,
+        config: &Value,
+        external_user_id: &str,
+        external_thread_id: &str,
+        mut rx: tokio::sync::mpsc::Receiver<crate::inbound::StreamReplyChunk>,
+    ) -> Result<(), ChannelError> {
+        let cfg = Self::extract_config(config)?;
+
+        // Parse "{chat_type}:{chat_id}:{open_id}" same as reply_to_user.
+        let (chat_type, sender_open_id) = {
+            let parts: Vec<&str> = external_user_id.splitn(3, ':').collect();
+            if parts.len() == 3 {
+                (Some(parts[0].to_string()), parts[2].to_string())
+            } else {
+                (None, external_user_id.to_string())
+            }
+        };
+        let is_group = matches!(chat_type.as_deref(), Some("group" | "topic"));
+        let prefix = if is_group && sender_open_id.starts_with("ou_") {
+            format!("<at id={sender_open_id}></at> ")
+        } else {
+            String::new()
+        };
+
+        // Wait for the first chunk before creating the card.
+        let first = match rx.recv().await {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+
+        let initial_content = format!("{prefix}{}", first.accumulated_text);
+        let card_id = self.create_streaming_card(&cfg, &initial_content).await?;
+
+        // Publish the interactive card message — routing mirrors reply_to_user.
+        let card_msg = json!({ "type": "card", "data": { "card_id": &card_id } });
+        if external_thread_id.starts_with("oc_") {
+            self.post_message(&cfg, "chat_id", external_thread_id, "interactive", &card_msg)
+                .await?;
+        } else {
+            self.post_message(&cfg, "open_id", &sender_open_id, "interactive", &card_msg)
+                .await?;
+        }
+
+        // Per-stream monotonic counter. Feishu requires `sequence` to be a
+        // positive **int32** scoped to the lifetime of one card's streaming
+        // session (streaming_mode true→false). A simple counter is both
+        // strictly monotonic and well within int32 range, sidestepping the
+        // 9499 "Invalid parameter value" error we'd get with a unix-ms
+        // timestamp (which overflows int32 past 2038-01).
+        fn advance_seq(last: &mut i32) -> i32 {
+            *last += 1;
+            *last
+        }
+        let mut last_seq: i32 = 0;
+
+        // Always flush initial content via the content-update endpoint.
+        let s = advance_seq(&mut last_seq);
+        self.update_card_content(&cfg, &card_id, STREAMING_ELEMENT_ID, &initial_content, s)
+            .await?;
+
+        if first.terminal {
+            let s = advance_seq(&mut last_seq);
+            self.close_card_streaming(&cfg, &card_id, s).await?;
+            return Ok(());
+        }
+
+        let mut last_sent = first.accumulated_text.clone();
+        let mut pending: Option<(String, bool)> = None;
+
+        // 500 ms throttle — mirrors qq_bot THROTTLE_CONSTANTS.DEFAULT_MS.
+        const THROTTLE: std::time::Duration = std::time::Duration::from_millis(500);
+        let mut last_flush_at: Option<tokio::time::Instant> = Some(tokio::time::Instant::now());
+
+        loop {
+            // Block until at least one chunk is available.
+            if pending.is_none() {
+                match rx.recv().await {
+                    Some(c) => pending = Some((c.accumulated_text, c.terminal)),
+                    None => break,
+                }
+            }
+
+            // Coalesce any immediately available chunks.
+            while let Ok(next) = rx.try_recv() {
+                pending = Some((next.accumulated_text, next.terminal));
+            }
+
+            let mut is_terminal = pending.as_ref().is_some_and(|p| p.1);
+
+            // For non-terminal chunks, wait up to THROTTLE since last flush,
+            // short-circuiting if a terminal chunk arrives during the wait.
+            if !is_terminal {
+                let target = match last_flush_at {
+                    Some(t) => t + THROTTLE,
+                    None => tokio::time::Instant::now() + THROTTLE,
+                };
+                while tokio::time::Instant::now() < target {
+                    let wait = target - tokio::time::Instant::now();
+                    tokio::select! {
+                        () = tokio::time::sleep(wait) => break,
+                        recv = rx.recv() => match recv {
+                            Some(c) => {
+                                let term = c.terminal;
+                                pending = Some((c.accumulated_text, term));
+                                if term {
+                                    is_terminal = true;
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                }
+                // Final drain after the throttle window.
+                while let Ok(next) = rx.try_recv() {
+                    pending = Some((next.accumulated_text, next.terminal));
+                }
+            }
+
+            let (send_text, is_terminal) = pending.take().expect("pending set above");
+
+            if send_text == last_sent && !is_terminal {
+                continue;
+            }
+
+            let content = format!("{prefix}{send_text}");
+            let s = advance_seq(&mut last_seq);
+            self.update_card_content(&cfg, &card_id, STREAMING_ELEMENT_ID, &content, s)
+                .await?;
+            last_sent = send_text;
+            last_flush_at = Some(tokio::time::Instant::now());
+
+            if is_terminal {
+                let s = advance_seq(&mut last_seq);
+                self.close_card_streaming(&cfg, &card_id, s).await?;
+                return Ok(());
+            }
+        }
+
+        // Sender dropped without a terminal chunk — flush last known content, then close.
+        let final_text = pending.map_or(last_sent, |(t, _)| t);
+        let content = format!("{prefix}{final_text}");
+        let s = advance_seq(&mut last_seq);
+        self.update_card_content(&cfg, &card_id, STREAMING_ELEMENT_ID, &content, s)
+            .await?;
+        let s = advance_seq(&mut last_seq);
+        self.close_card_streaming(&cfg, &card_id, s).await?;
+        Ok(())
     }
 }
