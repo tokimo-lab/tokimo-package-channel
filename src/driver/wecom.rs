@@ -51,6 +51,7 @@ use crate::capability::{ChannelCapabilities, InboundKind};
 use crate::direction::ChannelDirection;
 use crate::driver::ChannelDriver;
 use crate::error::ChannelError;
+use crate::file::{FilePayload, resolve_to_bytes};
 use crate::inbound::{InboundDriver, InboundEvent, InboundEventKind, WebhookOutcome};
 use crate::template::RenderedMessage;
 
@@ -173,6 +174,8 @@ impl ChannelDriver for WecomDriver {
             supports_card: false,
             supports_image: false,
             max_text_length: 4096,
+            supports_file: true,
+            max_file_size: 20 * 1024 * 1024,
         }
     }
 
@@ -215,6 +218,129 @@ impl ChannelDriver for WecomDriver {
                 });
             }
         }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn send_file(&self, config: &Value, file: &FilePayload, caption: Option<&str>) -> Result<(), ChannelError> {
+        let cfg = WecomConfig::from_value(config)?;
+        let webhook_url = cfg
+            .webhook_url
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| ChannelError::ConfigError("missing wecom webhookUrl for send_file".into()))?;
+        let corp_id = cfg
+            .corp_id
+            .as_deref()
+            .ok_or_else(|| ChannelError::ConfigError("wecom corpId required for send_file".into()))?;
+        let corp_secret = cfg
+            .corp_secret
+            .as_deref()
+            .ok_or_else(|| ChannelError::ConfigError("wecom corpSecret required for send_file".into()))?;
+
+        let (data, filename, content_type) = resolve_to_bytes(&self.client, file).await?;
+        let ct = content_type.as_deref().unwrap_or("application/octet-stream");
+        let is_image = ct.starts_with("image/");
+        let token = self.access_token(corp_id, corp_secret).await?;
+
+        if is_image && data.len() <= 2 * 1024 * 1024 {
+            // WeCom webhook supports image via base64 + md5
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+            let hash = md5::Md5::digest(&data);
+            let body = json!({
+                "msgtype": "image",
+                "image": {
+                    "base64": b64,
+                    "md5": hex::encode(hash),
+                },
+            });
+            let resp = self.client.post(webhook_url).json(&body).send().await?;
+            let status = resp.status().as_u16();
+            let resp_body = resp.text().await.unwrap_or_default();
+            if status != 200 {
+                return Err(ChannelError::ChannelRejected {
+                    status,
+                    body: resp_body,
+                });
+            }
+            if let Ok(parsed) = serde_json::from_str::<Value>(&resp_body) {
+                let code = parsed.get("errcode").and_then(Value::as_i64).unwrap_or(0);
+                if code != 0 {
+                    return Err(ChannelError::ChannelRejected {
+                        status,
+                        body: resp_body,
+                    });
+                }
+            }
+        } else {
+            // Upload via media/upload then send via webhook as file
+            let media_type = if is_image { "image" } else { "file" };
+            let part = reqwest::multipart::Part::bytes(data.to_vec())
+                .file_name(filename)
+                .mime_str(ct)
+                .map_err(|e| ChannelError::Other(format!("invalid mime: {e}")))?;
+            let form = reqwest::multipart::Form::new().part("media".to_string(), part);
+
+            let upload_url = format!("{WECOM_API_BASE}/media/upload?access_token={token}&type={media_type}");
+            let resp = self.client.post(&upload_url).multipart(form).send().await?;
+            let status = resp.status().as_u16();
+            let resp_body = resp.text().await.unwrap_or_default();
+            if status != 200 {
+                return Err(ChannelError::ChannelRejected {
+                    status,
+                    body: resp_body,
+                });
+            }
+            let parsed: Value = serde_json::from_str(&resp_body)
+                .map_err(|e| ChannelError::Other(format!("decode wecom media response: {e}")))?;
+            let code = parsed.get("errcode").and_then(Value::as_i64).unwrap_or(0);
+            if code != 0 {
+                return Err(ChannelError::ChannelRejected {
+                    status,
+                    body: format!("errcode={code} body={resp_body}"),
+                });
+            }
+            let media_id = parsed
+                .get("media_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ChannelError::Other("missing media_id in wecom response".into()))?;
+
+            // Send via webhook as file
+            let body = json!({
+                "msgtype": "file",
+                "file": { "media_id": media_id },
+            });
+            let resp = self.client.post(webhook_url).json(&body).send().await?;
+            let status = resp.status().as_u16();
+            let resp_body = resp.text().await.unwrap_or_default();
+            if status != 200 {
+                return Err(ChannelError::ChannelRejected {
+                    status,
+                    body: resp_body,
+                });
+            }
+            if let Ok(parsed) = serde_json::from_str::<Value>(&resp_body) {
+                let code = parsed.get("errcode").and_then(Value::as_i64).unwrap_or(0);
+                if code != 0 {
+                    return Err(ChannelError::ChannelRejected {
+                        status,
+                        body: resp_body,
+                    });
+                }
+            }
+        }
+
+        // Send caption as follow-up text if provided
+        if let Some(cap) = caption
+            && !cap.is_empty()
+        {
+            let body = json!({
+                "msgtype": "text",
+                "text": { "content": cap },
+            });
+            let _ = self.client.post(webhook_url).json(&body).send().await;
+        }
+
         Ok(())
     }
 

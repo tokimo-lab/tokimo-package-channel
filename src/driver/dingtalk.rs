@@ -25,6 +25,9 @@
 //! `"{conversationId}|{sessionWebhook}"` so `reply_to_user` can recover it
 //! without touching `raw`.
 
+use std::sync::Mutex;
+use std::time::Instant;
+
 use async_trait::async_trait;
 use axum::http::HeaderMap;
 use base64::Engine;
@@ -42,17 +45,22 @@ use crate::direction::ChannelDirection;
 use crate::driver::ChannelDriver;
 use crate::driver::dingtalk_ws;
 use crate::error::ChannelError;
+use crate::file::{FilePayload, resolve_to_bytes};
 use crate::inbound::{InboundDriver, InboundEmitter, PumpHandle, WebhookOutcome};
 use crate::template::RenderedMessage;
 
 pub struct DingtalkDriver {
     client: reqwest::Client,
+    oapi_token_cache: Mutex<Option<(String, Instant)>>,
 }
 
 impl DingtalkDriver {
     #[must_use]
     pub fn new(client: reqwest::Client) -> Self {
-        Self { client }
+        Self {
+            client,
+            oapi_token_cache: Mutex::new(None),
+        }
     }
 
     fn sign(timestamp: i64, secret: &str) -> Result<String, ChannelError> {
@@ -64,6 +72,136 @@ impl DingtalkDriver {
         let sig = mac.finalize().into_bytes();
         let b64 = base64::engine::general_purpose::STANDARD.encode(sig);
         Ok(urlencoding::encode(&b64).into_owned())
+    }
+
+    /// Fetch an OAPI access_token for media upload, cached until a minute before expiry.
+    async fn oapi_token(&self, cfg: &DingtalkConfig) -> Result<String, ChannelError> {
+        {
+            let cache = self.oapi_token_cache.lock().expect("oapi cache poisoned");
+            if let Some((token, expires_at)) = cache.as_ref()
+                && *expires_at > Instant::now()
+            {
+                return Ok(token.clone());
+            }
+        }
+
+        let client_id = cfg
+            .client_id
+            .as_deref()
+            .ok_or_else(|| ChannelError::ConfigError("dingtalk clientId required for media upload".into()))?;
+        let client_secret = cfg
+            .client_secret
+            .as_deref()
+            .ok_or_else(|| ChannelError::ConfigError("dingtalk clientSecret required for media upload".into()))?;
+
+        let url = format!(
+            "https://oapi.dingtalk.com/gettoken?appkey={}&appsecret={}",
+            urlencoding::encode(client_id),
+            urlencoding::encode(client_secret),
+        );
+        let resp = self.client.get(&url).send().await?;
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        if status != 200 {
+            return Err(ChannelError::ChannelRejected { status, body });
+        }
+        let parsed: Value =
+            serde_json::from_str(&body).map_err(|e| ChannelError::Other(format!("decode gettoken response: {e}")))?;
+        let code = parsed.get("errcode").and_then(Value::as_i64).unwrap_or(0);
+        if code != 0 {
+            return Err(ChannelError::ChannelRejected {
+                status,
+                body: format!("errcode={code} body={body}"),
+            });
+        }
+        let token = parsed
+            .get("access_token")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ChannelError::Other("missing access_token in gettoken response".into()))?
+            .to_string();
+        let expires_in = parsed
+            .get("expires_in")
+            .and_then(Value::as_u64)
+            .unwrap_or(7200)
+            .saturating_sub(60);
+        let expires_at = Instant::now() + std::time::Duration::from_secs(expires_in);
+
+        let mut cache = self.oapi_token_cache.lock().expect("oapi cache poisoned");
+        *cache = Some((token.clone(), expires_at));
+        Ok(token)
+    }
+
+    /// Upload media (image/file) to DingTalk and return the `media_id`.
+    async fn upload_media(
+        &self,
+        oapi_token: &str,
+        data: &[u8],
+        filename: &str,
+        media_type: &str,
+    ) -> Result<String, ChannelError> {
+        let mime = if media_type == "image" {
+            "image/jpeg"
+        } else {
+            "application/octet-stream"
+        };
+        let part = reqwest::multipart::Part::bytes(data.to_vec())
+            .file_name(filename.to_string())
+            .mime_str(mime)
+            .map_err(|e| ChannelError::Other(format!("invalid mime: {e}")))?;
+        let form = reqwest::multipart::Form::new().part("media".to_string(), part);
+
+        let url = format!("https://oapi.dingtalk.com/media/upload?access_token={oapi_token}&type={media_type}");
+        let resp = self.client.post(&url).multipart(form).send().await?;
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        if status != 200 {
+            return Err(ChannelError::ChannelRejected { status, body });
+        }
+        let parsed: Value =
+            serde_json::from_str(&body).map_err(|e| ChannelError::Other(format!("decode media response: {e}")))?;
+        let code = parsed.get("errcode").and_then(Value::as_i64).unwrap_or(0);
+        if code != 0 {
+            return Err(ChannelError::ChannelRejected {
+                status,
+                body: format!("errcode={code} body={body}"),
+            });
+        }
+        parsed
+            .get("media_id")
+            .and_then(Value::as_str)
+            .map(|s| s.strip_prefix('@').unwrap_or(s).to_string())
+            .ok_or_else(|| ChannelError::Other("missing media_id in response".into()))
+    }
+
+    /// Get a new-style API access_token for proactive robot messaging.
+    async fn api_token(&self, cfg: &DingtalkConfig) -> Result<String, ChannelError> {
+        let client_id = cfg
+            .client_id
+            .as_deref()
+            .ok_or_else(|| ChannelError::ConfigError("dingtalk clientId required".into()))?;
+        let client_secret = cfg
+            .client_secret
+            .as_deref()
+            .ok_or_else(|| ChannelError::ConfigError("dingtalk clientSecret required".into()))?;
+
+        let resp = self
+            .client
+            .post("https://api.dingtalk.com/v1.0/oauth2/accessToken")
+            .json(&json!({ "appKey": client_id, "appSecret": client_secret }))
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        if status != 200 {
+            return Err(ChannelError::ChannelRejected { status, body });
+        }
+        let parsed: Value = serde_json::from_str(&body)
+            .map_err(|e| ChannelError::Other(format!("decode accessToken response: {e}")))?;
+        parsed
+            .get("accessToken")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| ChannelError::Other("missing accessToken in response".into()))
     }
 }
 
@@ -108,6 +246,8 @@ impl ChannelDriver for DingtalkDriver {
             supports_card: false,
             supports_image: false,
             max_text_length: 20_000,
+            supports_file: true,
+            max_file_size: 20 * 1024 * 1024,
         }
     }
 
@@ -152,6 +292,85 @@ impl ChannelDriver for DingtalkDriver {
                 });
             }
         }
+        Ok(())
+    }
+
+    async fn send_file(&self, config: &Value, file: &FilePayload, caption: Option<&str>) -> Result<(), ChannelError> {
+        let cfg = DingtalkConfig::from_value(config)?;
+        let default_user_id = config
+            .get("defaultUserId")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty());
+        let robot_code =
+            cfg.robot_code.as_deref().or(cfg.client_id.as_deref()).ok_or_else(|| {
+                ChannelError::ConfigError("dingtalk clientId/robotCode required for send_file".into())
+            })?;
+
+        let (data, filename, content_type) = resolve_to_bytes(&self.client, file).await?;
+        let ct = content_type.as_deref().unwrap_or("application/octet-stream");
+        let media_type = if ct.starts_with("image/") { "image" } else { "file" };
+
+        // Step 1: Get OAPI token and upload media
+        let oapi_token = self.oapi_token(&cfg).await?;
+        let media_id = self.upload_media(&oapi_token, &data, &filename, media_type).await?;
+
+        // Step 2: Get API token for proactive messaging
+        let api_token = self.api_token(&cfg).await?;
+
+        // Step 3: Send via proactive robot API
+        let msg_key = if media_type == "image" {
+            // DingTalk doesn't have a standalone image msgKey for proactive API.
+            // We send the image as a file instead.
+            "sampleFile"
+        } else {
+            "sampleFile"
+        };
+        let msg_param = json!({
+            "mediaId": format!("@{media_id}"),
+            "fileName": filename,
+            "fileType": filename.rsplit('.').next().unwrap_or("file"),
+        });
+
+        if let Some(user_id) = default_user_id {
+            // Send to single user
+            let body = json!({
+                "robotCode": robot_code,
+                "userIds": [user_id],
+                "msgKey": msg_key,
+                "msgParam": serde_json::to_string(&msg_param).unwrap_or_default(),
+            });
+            let resp = self
+                .client
+                .post("https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend")
+                .bearer_auth(&api_token)
+                .json(&body)
+                .send()
+                .await?;
+            let status = resp.status().as_u16();
+            let resp_body = resp.text().await.unwrap_or_default();
+            if !(200..300).contains(&status) {
+                return Err(ChannelError::ChannelRejected {
+                    status,
+                    body: resp_body,
+                });
+            }
+        } else {
+            return Err(ChannelError::ConfigError(
+                "dingtalk defaultUserId required for send_file (proactive API needs a recipient)".into(),
+            ));
+        }
+
+        // Send caption as follow-up via webhook if provided
+        if let Some(cap) = caption
+            && let Some(webhook_url) = cfg.webhook_url.as_deref().filter(|s| !s.is_empty())
+        {
+            let body = json!({
+                "msgtype": "text",
+                "text": { "content": cap },
+            });
+            let _ = self.client.post(webhook_url).json(&body).send().await;
+        }
+
         Ok(())
     }
 

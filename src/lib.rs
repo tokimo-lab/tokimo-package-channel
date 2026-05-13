@@ -9,6 +9,7 @@ pub mod config_store;
 pub mod direction;
 pub mod driver;
 pub mod error;
+pub mod file;
 pub mod hub;
 pub mod inbound;
 pub mod template;
@@ -18,6 +19,7 @@ pub use config_store::{ChannelConfigStore, ConfigWriter, NoopConfigStore};
 pub use direction::ChannelDirection;
 pub use driver::ChannelDriver;
 pub use error::ChannelError;
+pub use file::FilePayload;
 pub use hub::{ChannelHub, DriverMetadata, SendTarget, TemplateFn};
 pub use inbound::{
     InboundAttachment, InboundDriver, InboundEmitter, InboundEvent, InboundEventKind, PumpHandle, StreamReplyChunk,

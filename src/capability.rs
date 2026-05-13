@@ -7,6 +7,10 @@ pub struct ChannelCapabilities {
     pub supports_card: bool,
     pub supports_image: bool,
     pub max_text_length: usize,
+    /// Whether the channel can send files/images via `send_file`.
+    pub supports_file: bool,
+    /// Maximum file size in bytes the platform accepts (0 = unknown/unlimited).
+    pub max_file_size: usize,
 }
 
 /// How an inbound driver receives messages from the external platform.

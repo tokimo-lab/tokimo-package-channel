@@ -19,6 +19,7 @@ use crate::capability::{ChannelCapabilities, InboundKind};
 use crate::direction::ChannelDirection;
 use crate::driver::ChannelDriver;
 use crate::error::ChannelError;
+use crate::file::{FilePayload, is_image_content_type};
 use crate::inbound::{InboundDriver, InboundEmitter, InboundEvent, InboundEventKind, PumpHandle, WebhookOutcome};
 use crate::template::RenderedMessage;
 
@@ -68,6 +69,8 @@ impl ChannelDriver for TelegramBotDriver {
             supports_card: false,
             supports_image: true,
             max_text_length: 4096,
+            supports_file: true,
+            max_file_size: 50 * 1024 * 1024,
         }
     }
 
@@ -88,6 +91,70 @@ impl ChannelDriver for TelegramBotDriver {
         let url = Self::api_url(&cfg.bot_token, "sendMessage");
         debug!(%chat_id, "sending telegram message");
         let resp = self.client.post(&url).json(&body).send().await?;
+        let status = resp.status().as_u16();
+        let resp_body = resp.text().await.unwrap_or_default();
+        if status != 200 {
+            return Err(ChannelError::ChannelRejected {
+                status,
+                body: resp_body,
+            });
+        }
+        Ok(())
+    }
+
+    async fn send_file(&self, config: &Value, file: &FilePayload, caption: Option<&str>) -> Result<(), ChannelError> {
+        let cfg: TelegramConfig = serde_json::from_value(config.clone())
+            .map_err(|e| ChannelError::ConfigError(format!("invalid telegram_bot config: {e}")))?;
+        let chat_id = cfg
+            .default_chat_id
+            .ok_or_else(|| ChannelError::ConfigError("defaultChatId required for send_file".into()))?;
+
+        let ct = file.content_type_hint().unwrap_or("application/octet-stream");
+        let is_image = is_image_content_type(ct);
+        let method = if is_image { "sendPhoto" } else { "sendDocument" };
+        let field_name = if is_image { "photo" } else { "document" };
+        let url = Self::api_url(&cfg.bot_token, method);
+
+        let form = match file {
+            FilePayload::Bytes {
+                data,
+                filename,
+                content_type,
+            } => {
+                let mime = content_type.as_deref().unwrap_or("application/octet-stream");
+                let part = reqwest::multipart::Part::bytes(data.to_vec())
+                    .file_name(filename.clone())
+                    .mime_str(mime)
+                    .map_err(|e| ChannelError::Other(format!("invalid mime: {e}")))?;
+                let mut form = reqwest::multipart::Form::new().part(field_name.to_string(), part);
+                form = form.text("chat_id", chat_id.to_string());
+                if let Some(cap) = caption {
+                    form = form.text("caption", cap.to_string());
+                }
+                form
+            }
+            FilePayload::Url(file_url) => {
+                let mut body = json!({
+                    "chat_id": chat_id,
+                    field_name: file_url,
+                });
+                if let Some(cap) = caption {
+                    body["caption"] = json!(cap);
+                }
+                let resp = self.client.post(&url).json(&body).send().await?;
+                let status = resp.status().as_u16();
+                let resp_body = resp.text().await.unwrap_or_default();
+                if status != 200 {
+                    return Err(ChannelError::ChannelRejected {
+                        status,
+                        body: resp_body,
+                    });
+                }
+                return Ok(());
+            }
+        };
+
+        let resp = self.client.post(&url).multipart(form).send().await?;
         let status = resp.status().as_u16();
         let resp_body = resp.text().await.unwrap_or_default();
         if status != 200 {
