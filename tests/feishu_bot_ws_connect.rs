@@ -1,4 +1,9 @@
-#![allow(clippy::print_stdout)]
+#![allow(
+    clippy::print_stdout,
+    clippy::panic,
+    clippy::match_wild_err_arm,
+    clippy::duration_suboptimal_units
+)]
 
 //! Repro test for the "Feishu bot channel silently breaks on Windows" bug.
 //!
