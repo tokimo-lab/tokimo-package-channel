@@ -320,6 +320,96 @@ impl FeishuBotDriver {
         }
         Ok(())
     }
+
+    /// Drive the streaming update loop: receive chunks, throttle at 500 ms,
+    /// flush to Feishu cardkit, and close on terminal or sender drop.
+    async fn stream_card_updates(
+        &self,
+        cfg: &FeishuBotConfig,
+        card_id: &str,
+        prefix: &str,
+        initial_text: String,
+        last_seq: &mut i32,
+        rx: &mut tokio::sync::mpsc::Receiver<crate::inbound::StreamReplyChunk>,
+    ) -> Result<(), ChannelError> {
+        fn advance_seq(last: &mut i32) -> i32 {
+            *last += 1;
+            *last
+        }
+
+        let mut last_sent = initial_text;
+        let mut pending: Option<(String, bool)> = None;
+        const THROTTLE: std::time::Duration = std::time::Duration::from_millis(500);
+        let mut last_flush_at: Option<tokio::time::Instant> = Some(tokio::time::Instant::now());
+
+        loop {
+            if pending.is_none() {
+                match rx.recv().await {
+                    Some(c) => pending = Some((c.accumulated_text, c.terminal)),
+                    None => break,
+                }
+            }
+            while let Ok(next) = rx.try_recv() {
+                pending = Some((next.accumulated_text, next.terminal));
+            }
+
+            let mut is_terminal = pending.as_ref().is_some_and(|p| p.1);
+
+            if !is_terminal {
+                let target = match last_flush_at {
+                    Some(t) => t + THROTTLE,
+                    None => tokio::time::Instant::now() + THROTTLE,
+                };
+                while tokio::time::Instant::now() < target {
+                    let wait = target - tokio::time::Instant::now();
+                    tokio::select! {
+                        () = tokio::time::sleep(wait) => break,
+                        recv = rx.recv() => match recv {
+                            Some(c) => {
+                                let term = c.terminal;
+                                pending = Some((c.accumulated_text, term));
+                                if term {
+                                    is_terminal = true;
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                }
+                while let Ok(next) = rx.try_recv() {
+                    pending = Some((next.accumulated_text, next.terminal));
+                }
+            }
+
+            let (send_text, is_terminal) = pending.take().expect("pending set above");
+            if send_text == last_sent && !is_terminal {
+                continue;
+            }
+
+            let content = format!("{prefix}{send_text}");
+            let s = advance_seq(last_seq);
+            self.update_card_content(cfg, card_id, STREAMING_ELEMENT_ID, &content, s)
+                .await?;
+            last_sent = send_text;
+            last_flush_at = Some(tokio::time::Instant::now());
+
+            if is_terminal {
+                let s = advance_seq(last_seq);
+                self.close_card_streaming(cfg, card_id, s).await?;
+                return Ok(());
+            }
+        }
+
+        let final_text = pending.map_or(last_sent, |(t, _)| t);
+        let content = format!("{prefix}{final_text}");
+        let s = advance_seq(last_seq);
+        self.update_card_content(cfg, card_id, STREAMING_ELEMENT_ID, &content, s)
+            .await?;
+        let s = advance_seq(last_seq);
+        self.close_card_streaming(cfg, card_id, s).await?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -520,9 +610,8 @@ impl InboundDriver for FeishuBotDriver {
         };
 
         // Wait for the first chunk before creating the card.
-        let first = match rx.recv().await {
-            Some(c) => c,
-            None => return Ok(()),
+        let Some(first) = rx.recv().await else {
+            return Ok(());
         };
 
         let initial_content = format!("{prefix}{}", first.accumulated_text);
@@ -561,87 +650,14 @@ impl InboundDriver for FeishuBotDriver {
             return Ok(());
         }
 
-        let mut last_sent = first.accumulated_text.clone();
-        let mut pending: Option<(String, bool)> = None;
-
-        // 500 ms throttle — mirrors qq_bot THROTTLE_CONSTANTS.DEFAULT_MS.
-        const THROTTLE: std::time::Duration = std::time::Duration::from_millis(500);
-        let mut last_flush_at: Option<tokio::time::Instant> = Some(tokio::time::Instant::now());
-
-        loop {
-            // Block until at least one chunk is available.
-            if pending.is_none() {
-                match rx.recv().await {
-                    Some(c) => pending = Some((c.accumulated_text, c.terminal)),
-                    None => break,
-                }
-            }
-
-            // Coalesce any immediately available chunks.
-            while let Ok(next) = rx.try_recv() {
-                pending = Some((next.accumulated_text, next.terminal));
-            }
-
-            let mut is_terminal = pending.as_ref().is_some_and(|p| p.1);
-
-            // For non-terminal chunks, wait up to THROTTLE since last flush,
-            // short-circuiting if a terminal chunk arrives during the wait.
-            if !is_terminal {
-                let target = match last_flush_at {
-                    Some(t) => t + THROTTLE,
-                    None => tokio::time::Instant::now() + THROTTLE,
-                };
-                while tokio::time::Instant::now() < target {
-                    let wait = target - tokio::time::Instant::now();
-                    tokio::select! {
-                        () = tokio::time::sleep(wait) => break,
-                        recv = rx.recv() => match recv {
-                            Some(c) => {
-                                let term = c.terminal;
-                                pending = Some((c.accumulated_text, term));
-                                if term {
-                                    is_terminal = true;
-                                    break;
-                                }
-                            }
-                            None => break,
-                        }
-                    }
-                }
-                // Final drain after the throttle window.
-                while let Ok(next) = rx.try_recv() {
-                    pending = Some((next.accumulated_text, next.terminal));
-                }
-            }
-
-            let (send_text, is_terminal) = pending.take().expect("pending set above");
-
-            if send_text == last_sent && !is_terminal {
-                continue;
-            }
-
-            let content = format!("{prefix}{send_text}");
-            let s = advance_seq(&mut last_seq);
-            self.update_card_content(&cfg, &card_id, STREAMING_ELEMENT_ID, &content, s)
-                .await?;
-            last_sent = send_text;
-            last_flush_at = Some(tokio::time::Instant::now());
-
-            if is_terminal {
-                let s = advance_seq(&mut last_seq);
-                self.close_card_streaming(&cfg, &card_id, s).await?;
-                return Ok(());
-            }
-        }
-
-        // Sender dropped without a terminal chunk — flush last known content, then close.
-        let final_text = pending.map_or(last_sent, |(t, _)| t);
-        let content = format!("{prefix}{final_text}");
-        let s = advance_seq(&mut last_seq);
-        self.update_card_content(&cfg, &card_id, STREAMING_ELEMENT_ID, &content, s)
-            .await?;
-        let s = advance_seq(&mut last_seq);
-        self.close_card_streaming(&cfg, &card_id, s).await?;
-        Ok(())
+        self.stream_card_updates(
+            &cfg,
+            &card_id,
+            &prefix,
+            first.accumulated_text.clone(),
+            &mut last_seq,
+            &mut rx,
+        )
+        .await
     }
 }
