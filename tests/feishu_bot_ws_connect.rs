@@ -1,3 +1,5 @@
+#![allow(clippy::print_stdout)]
+
 //! Repro test for the "Feishu bot channel silently breaks on Windows" bug.
 //!
 //! Symptom (from production logs on Windows):
