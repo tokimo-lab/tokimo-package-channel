@@ -28,6 +28,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use axum::http::HeaderMap;
 use bytes::Bytes;
+use reqwest::multipart::{Form, Part};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -178,6 +179,64 @@ impl FeishuBotDriver {
             }
         }
         Ok(())
+    }
+
+    fn extract_upload_key(body: &str, status: u16, key: &str, context: &str) -> Result<String, ChannelError> {
+        let parsed: Value =
+            serde_json::from_str(body).map_err(|e| ChannelError::Other(format!("decode {context} response: {e}")))?;
+        let code = parsed.get("code").and_then(Value::as_i64).unwrap_or(0);
+        if code != 0 {
+            return Err(ChannelError::ChannelRejected {
+                status,
+                body: format!("code={code} body={body}"),
+            });
+        }
+        parsed
+            .get("data")
+            .and_then(|d| d.get(key))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| ChannelError::Other(format!("missing {key} in {context} response")))
+    }
+
+    async fn upload_image(&self, token: &str, data: Bytes, content_type: &str) -> Result<String, ChannelError> {
+        let url = format!("{FEISHU_API_BASE}/open-apis/im/v1/images");
+        let image = Part::bytes(data.to_vec())
+            .mime_str(content_type)
+            .map_err(|e| ChannelError::Other(format!("encode image upload: {e}")))?;
+        let form = Form::new().text("image_type", "message").part("image", image);
+        let resp = self.client.post(&url).bearer_auth(token).multipart(form).send().await?;
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        if status != 200 {
+            return Err(ChannelError::ChannelRejected { status, body });
+        }
+        Self::extract_upload_key(&body, status, "image_key", "image upload")
+    }
+
+    async fn upload_file(
+        &self,
+        token: &str,
+        data: Bytes,
+        filename: &str,
+        content_type: &str,
+    ) -> Result<String, ChannelError> {
+        let url = format!("{FEISHU_API_BASE}/open-apis/im/v1/files");
+        let file = Part::bytes(data.to_vec())
+            .file_name(filename.to_string())
+            .mime_str(content_type)
+            .map_err(|e| ChannelError::Other(format!("encode file upload: {e}")))?;
+        let form = Form::new()
+            .text("file_type", "stream")
+            .text("file_name", filename.to_string())
+            .part("file", file);
+        let resp = self.client.post(&url).bearer_auth(token).multipart(form).send().await?;
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        if status != 200 {
+            return Err(ChannelError::ChannelRejected { status, body });
+        }
+        Self::extract_upload_key(&body, status, "file_key", "file upload")
     }
 
     /// POST im/v1/messages/:id/reactions — add reaction to a message.
@@ -582,6 +641,46 @@ impl InboundDriver for FeishuBotDriver {
         // Fallback: no chat_id — DM the sender by open_id.
         self.post_message(&cfg, "open_id", sender_open_id, "interactive", &card)
             .await
+    }
+
+    async fn reply_file_to_user(
+        &self,
+        config: &Value,
+        external_user_id: &str,
+        external_thread_id: &str,
+        file: &crate::file::FilePayload,
+        caption: Option<&str>,
+    ) -> Result<(), ChannelError> {
+        let cfg = Self::extract_config(config)?;
+        let sender_open_id = {
+            let parts: Vec<&str> = external_user_id.splitn(3, ':').collect();
+            if parts.len() == 3 { parts[2] } else { external_user_id }
+        };
+
+        let (data, filename, content_type) = crate::file::resolve_to_bytes(&self.client, file).await?;
+        let content_type = content_type.unwrap_or_else(|| "application/octet-stream".to_string());
+        let token = self.tenant_token(&cfg).await?;
+        let (msg_type, content) = if crate::file::is_image_content_type(&content_type) {
+            let image_key = self.upload_image(&token, data, &content_type).await?;
+            ("image", json!({ "image_key": image_key }))
+        } else {
+            let file_key = self.upload_file(&token, data, &filename, &content_type).await?;
+            ("file", json!({ "file_key": file_key }))
+        };
+
+        let (receive_id_type, receive_id) = if external_thread_id.starts_with("oc_") {
+            ("chat_id", external_thread_id)
+        } else {
+            ("open_id", sender_open_id)
+        };
+
+        self.post_message(&cfg, receive_id_type, receive_id, msg_type, &content)
+            .await?;
+        if let Some(cap) = caption {
+            self.post_message(&cfg, receive_id_type, receive_id, "text", &json!({ "text": cap }))
+                .await?;
+        }
+        Ok(())
     }
 
     async fn reply_to_user_streaming(
