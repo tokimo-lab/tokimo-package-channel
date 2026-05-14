@@ -152,6 +152,17 @@ pub trait InboundDriver: Send + Sync {
         Err(ChannelError::Unsupported("reply_to_user not implemented".into()))
     }
 
+    async fn reply_file_to_user(
+        &self,
+        _config: &Value,
+        _external_user_id: &str,
+        _external_thread_id: &str,
+        _file: &crate::file::FilePayload,
+        _caption: Option<&str>,
+    ) -> Result<(), ChannelError> {
+        Err(ChannelError::Unsupported("reply_file_to_user not implemented".into()))
+    }
+
     /// Stream a reply to the external user as it's being generated. Drivers
     /// that have no native streaming primitive should fall back to a
     /// buffered one-shot send by draining `rx` and invoking `reply_to_user`

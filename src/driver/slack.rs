@@ -32,7 +32,6 @@ use crate::direction::ChannelDirection;
 use crate::driver::ChannelDriver;
 use crate::driver::slack_ws;
 use crate::error::ChannelError;
-use crate::file::{FilePayload, resolve_to_bytes};
 use crate::inbound::{InboundDriver, InboundEmitter, PumpHandle, WebhookOutcome};
 use crate::template::RenderedMessage;
 
@@ -86,8 +85,6 @@ impl ChannelDriver for SlackDriver {
             supports_card: false,
             supports_image: true,
             max_text_length: 40_000,
-            supports_file: true,
-            max_file_size: 100 * 1024 * 1024,
         }
     }
 
@@ -108,101 +105,6 @@ impl ChannelDriver for SlackDriver {
             let body = resp.text().await.unwrap_or_default();
             return Err(ChannelError::ChannelRejected { status, body });
         }
-        Ok(())
-    }
-
-    async fn send_file(&self, config: &Value, file: &FilePayload, caption: Option<&str>) -> Result<(), ChannelError> {
-        let cfg = SlackConfig::from_value(config)?;
-        let bot_token = cfg
-            .bot_token
-            .as_deref()
-            .ok_or_else(|| ChannelError::ConfigError("slack botToken required for send_file".into()))?;
-
-        let (data, filename, _content_type) = resolve_to_bytes(&self.client, file).await?;
-        let file_len = data.len();
-
-        // Step 1: Get upload URL
-        let get_url = format!("{SLACK_API_BASE}/files.getUploadURLExternal");
-        let get_resp = self
-            .client
-            .get(&get_url)
-            .query(&[("filename", filename.as_str()), ("length", &file_len.to_string())])
-            .bearer_auth(bot_token)
-            .send()
-            .await?;
-        let status = get_resp.status().as_u16();
-        let body = get_resp.text().await.unwrap_or_default();
-        if !(200..300).contains(&status) {
-            return Err(ChannelError::ChannelRejected { status, body });
-        }
-        let parsed: Value = serde_json::from_str(&body)
-            .map_err(|e| ChannelError::Other(format!("decode slack upload url response: {e}")))?;
-        if !parsed.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-            return Err(ChannelError::ChannelRejected {
-                status,
-                body: format!(
-                    "slack error: {}",
-                    parsed.get("error").and_then(Value::as_str).unwrap_or("unknown")
-                ),
-            });
-        }
-        let upload_url = parsed
-            .get("upload_url")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ChannelError::Other("missing upload_url in slack response".into()))?
-            .to_string();
-        let file_id = parsed
-            .get("file_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ChannelError::Other("missing file_id in slack response".into()))?
-            .to_string();
-
-        // Step 2: Upload file bytes to the presigned URL
-        let put_resp = self
-            .client
-            .put(&upload_url)
-            .header("Content-Type", "application/octet-stream")
-            .body(data.to_vec())
-            .send()
-            .await?;
-        let status = put_resp.status().as_u16();
-        if !(200..300).contains(&status) {
-            let body = put_resp.text().await.unwrap_or_default();
-            return Err(ChannelError::ChannelRejected { status, body });
-        }
-
-        // Step 3: Complete upload (make file visible)
-        let complete_url = format!("{SLACK_API_BASE}/files.completeUploadExternal");
-        let mut complete_body = json!({
-            "files": [{ "id": file_id }],
-        });
-        if let Some(cap) = caption {
-            complete_body["initial_comment"] = json!(cap);
-        }
-        let complete_resp = self
-            .client
-            .post(&complete_url)
-            .bearer_auth(bot_token)
-            .json(&complete_body)
-            .send()
-            .await?;
-        let status = complete_resp.status().as_u16();
-        let body = complete_resp.text().await.unwrap_or_default();
-        if !(200..300).contains(&status) {
-            return Err(ChannelError::ChannelRejected { status, body });
-        }
-        if let Ok(parsed) = serde_json::from_str::<Value>(&body)
-            && !parsed.get("ok").and_then(Value::as_bool).unwrap_or(false)
-        {
-            return Err(ChannelError::ChannelRejected {
-                status,
-                body: format!(
-                    "slack error: {}",
-                    parsed.get("error").and_then(Value::as_str).unwrap_or("unknown")
-                ),
-            });
-        }
-
         Ok(())
     }
 

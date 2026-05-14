@@ -21,7 +21,6 @@ use crate::driver::{
     weclaw::WeclawDriver, wecom::WecomDriver,
 };
 use crate::error::ChannelError;
-use crate::file::FilePayload;
 use crate::inbound::{InboundEmitter, InboundEvent, PumpHandle, WebhookOutcome};
 use crate::template::{RenderedMessage, TemplateContext, render_default};
 
@@ -215,35 +214,6 @@ impl ChannelHub {
 
     // ── Inbound lifecycle ────────────────────────────────────────────────────
 
-    pub async fn send_file(
-        &self,
-        channel_type: &str,
-        config: &Value,
-        file: &FilePayload,
-        caption: Option<&str>,
-    ) -> Result<(), ChannelError> {
-        let driver = self
-            .drivers
-            .get(channel_type)
-            .ok_or_else(|| ChannelError::UnsupportedChannel(channel_type.to_string()))?;
-
-        if !driver.direction().supports_outbound() {
-            return Err(ChannelError::Unsupported(format!(
-                "channel '{channel_type}' is inbound-only"
-            )));
-        }
-
-        if !driver.capabilities().supports_file {
-            return Err(ChannelError::Unsupported(format!(
-                "channel '{channel_type}' does not support file sending"
-            )));
-        }
-
-        driver.send_file(config, file, caption).await?;
-        info!("file sent via {channel_type}");
-        Ok(())
-    }
-
     pub fn subscribe_inbound(&self) -> broadcast::Receiver<InboundEvent> {
         self.inbound_tx.subscribe()
     }
@@ -357,6 +327,27 @@ impl ChannelHub {
             .ok_or_else(|| ChannelError::Unsupported(format!("channel '{channel_type}' has no inbound driver")))?;
         inbound
             .reply_to_user(config, external_user_id, external_thread_id, text)
+            .await
+    }
+
+    pub async fn reply_file_to_user(
+        &self,
+        channel_type: &str,
+        config: &Value,
+        external_user_id: &str,
+        external_thread_id: &str,
+        file: &crate::file::FilePayload,
+        caption: Option<&str>,
+    ) -> Result<(), ChannelError> {
+        let driver = self
+            .drivers
+            .get(channel_type)
+            .ok_or_else(|| ChannelError::UnsupportedChannel(channel_type.to_string()))?;
+        let inbound = driver
+            .inbound()
+            .ok_or_else(|| ChannelError::Unsupported(format!("channel '{channel_type}' has no inbound driver")))?;
+        inbound
+            .reply_file_to_user(config, external_user_id, external_thread_id, file, caption)
             .await
     }
 

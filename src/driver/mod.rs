@@ -20,7 +20,6 @@ use serde_json::Value;
 use crate::capability::ChannelCapabilities;
 use crate::direction::ChannelDirection;
 use crate::error::ChannelError;
-use crate::file::FilePayload;
 use crate::inbound::InboundDriver;
 use crate::template::RenderedMessage;
 
@@ -40,20 +39,6 @@ pub trait ChannelDriver: Send + Sync + 'static {
     async fn send(&self, _config: &Value, _message: &RenderedMessage) -> Result<(), ChannelError> {
         Err(ChannelError::Unsupported(format!(
             "channel '{}' does not support send",
-            self.channel_type()
-        )))
-    }
-
-    /// Send a file/image to the channel. Drivers without file support return
-    /// [`ChannelError::Unsupported`].
-    async fn send_file(
-        &self,
-        _config: &Value,
-        _file: &FilePayload,
-        _caption: Option<&str>,
-    ) -> Result<(), ChannelError> {
-        Err(ChannelError::Unsupported(format!(
-            "channel '{}' does not support send_file",
             self.channel_type()
         )))
     }

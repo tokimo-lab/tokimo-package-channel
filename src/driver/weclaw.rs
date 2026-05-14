@@ -54,8 +54,6 @@ impl ChannelDriver for WeclawDriver {
             supports_card: false,
             supports_image: false,
             max_text_length: 0,
-            supports_file: false,
-            max_file_size: 0,
         }
     }
 

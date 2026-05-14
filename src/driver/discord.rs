@@ -43,7 +43,6 @@ use crate::direction::ChannelDirection;
 use crate::driver::ChannelDriver;
 use crate::driver::discord_ws;
 use crate::error::ChannelError;
-use crate::file::{FilePayload, resolve_to_bytes};
 use crate::inbound::{InboundDriver, InboundEmitter, PumpHandle, WebhookOutcome};
 use crate::template::RenderedMessage;
 
@@ -107,8 +106,6 @@ impl ChannelDriver for DiscordDriver {
             supports_card: false,
             supports_image: true,
             max_text_length: 2000,
-            supports_file: true,
-            max_file_size: 25 * 1024 * 1024,
         }
     }
 
@@ -127,42 +124,6 @@ impl ChannelDriver for DiscordDriver {
 
         debug!(url = %webhook_url, "sending discord notification");
         let resp = self.client.post(webhook_url).json(&body).send().await?;
-        let status = resp.status().as_u16();
-        if !(200..300).contains(&status) {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ChannelError::ChannelRejected { status, body });
-        }
-        Ok(())
-    }
-
-    async fn send_file(&self, config: &Value, file: &FilePayload, caption: Option<&str>) -> Result<(), ChannelError> {
-        let webhook_url = config
-            .get("webhookUrl")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| ChannelError::ConfigError("missing webhookUrl".into()))?;
-
-        let (data, filename, content_type) = resolve_to_bytes(&self.client, file).await?;
-        let mime = content_type.as_deref().unwrap_or("application/octet-stream");
-
-        let part = reqwest::multipart::Part::bytes(data.to_vec())
-            .file_name(filename)
-            .mime_str(mime)
-            .map_err(|e| ChannelError::Other(format!("invalid mime: {e}")))?;
-
-        let mut payload = json!({});
-        if let Some(cap) = caption {
-            payload["content"] = json!(cap);
-        }
-        if let Some(username) = config.get("username").and_then(Value::as_str).filter(|s| !s.is_empty()) {
-            payload["username"] = json!(username);
-        }
-
-        let form = reqwest::multipart::Form::new()
-            .part("files[0]".to_string(), part)
-            .text("payload_json", serde_json::to_string(&payload).unwrap_or_default());
-
-        let resp = self.client.post(webhook_url).multipart(form).send().await?;
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
             let body = resp.text().await.unwrap_or_default();

@@ -40,7 +40,6 @@ use crate::direction::ChannelDirection;
 use crate::driver::ChannelDriver;
 use crate::driver::qq_bot_ws;
 use crate::error::ChannelError;
-use crate::file::FilePayload;
 use crate::inbound::{InboundDriver, InboundEmitter, InboundEvent, PumpHandle, WebhookOutcome};
 use crate::template::RenderedMessage;
 
@@ -441,8 +440,6 @@ impl ChannelDriver for QqBotDriver {
             supports_card: false,
             supports_image: true,
             max_text_length: 0,
-            supports_file: true,
-            max_file_size: 0, // URL-only; no byte upload
         }
     }
 
@@ -460,73 +457,6 @@ impl ChannelDriver for QqBotDriver {
         let body = build_message_body(text, None, true, seq);
         let path = format!("/v2/users/{}/messages", urlencoding::encode(openid));
         self.post_v2_message(&cfg, &path, &body).await?;
-        Ok(())
-    }
-
-    async fn send_file(&self, config: &Value, file: &FilePayload, caption: Option<&str>) -> Result<(), ChannelError> {
-        let cfg = Self::extract_config(config)?;
-        let openid = cfg
-            .default_user_openid
-            .as_deref()
-            .ok_or_else(|| ChannelError::ConfigError("defaultUserOpenid required for send_file".into()))?;
-
-        // QQ Bot file API only accepts URLs, not raw bytes
-        let file_url = match file {
-            FilePayload::Url(url) => url.clone(),
-            FilePayload::Bytes { .. } => {
-                return Err(ChannelError::Unsupported(
-                    "qq_bot send_file only supports URL payloads; raw bytes are not accepted".into(),
-                ));
-            }
-        };
-
-        let token = self.access_token(&cfg).await?;
-
-        // Upload file to QQ — returns file_info for sending
-        let upload_url = format!("{QQ_BOT_API_BASE}/v2/users/{}/files", urlencoding::encode(openid));
-        let upload_body = json!({
-            "file_type": 1,
-            "url": file_url,
-            "srv_send_msg": false,
-        });
-        let resp = self
-            .client
-            .post(&upload_url)
-            .header("Authorization", format!("QQBot {token}"))
-            .json(&upload_body)
-            .send()
-            .await?;
-        let status = resp.status().as_u16();
-        let body = resp.text().await.unwrap_or_default();
-        if status != 200 {
-            return Err(ChannelError::ChannelRejected { status, body });
-        }
-        let parsed: Value = serde_json::from_str(&body)
-            .map_err(|e| ChannelError::Other(format!("decode qq_bot file upload response: {e}")))?;
-        let code = parsed.get("code").and_then(Value::as_i64).unwrap_or(0);
-        if code != 0 {
-            return Err(ChannelError::ChannelRejected {
-                status,
-                body: format!("code={code} body={body}"),
-            });
-        }
-        let file_info = parsed
-            .get("file_info")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ChannelError::Other("missing file_info in qq_bot response".into()))?;
-
-        // Send message with file_info
-        let seq = Self::gen_msg_seq();
-        let mut msg_body = json!({
-            "msg_type": 7,
-            "file_info": file_info,
-            "msg_seq": seq,
-        });
-        if let Some(cap) = caption {
-            msg_body["content"] = json!(cap);
-        }
-        let path = format!("/v2/users/{}/messages", urlencoding::encode(openid));
-        self.post_v2_message(&cfg, &path, &msg_body).await?;
         Ok(())
     }
 

@@ -40,7 +40,6 @@ use crate::direction::ChannelDirection;
 use crate::driver::ChannelDriver;
 use crate::driver::feishu_bot_ws;
 use crate::error::ChannelError;
-use crate::file::{FilePayload, is_image_content_type, resolve_to_bytes};
 use crate::inbound::{InboundDriver, InboundEmitter, InboundEvent, PumpHandle, WebhookOutcome};
 use crate::template::RenderedMessage;
 
@@ -179,92 +178,6 @@ impl FeishuBotDriver {
             }
         }
         Ok(())
-    }
-
-    /// Upload an image to Feishu and return the `image_key`.
-    async fn upload_image(&self, token: &str, data: &[u8], filename: &str) -> Result<String, ChannelError> {
-        let part = reqwest::multipart::Part::bytes(data.to_vec())
-            .file_name(filename.to_string())
-            .mime_str("image/png")
-            .map_err(|e| ChannelError::Other(format!("invalid mime: {e}")))?;
-        let form = reqwest::multipart::Form::new()
-            .text("image_type", "message")
-            .part("image", part);
-
-        let url = format!("{FEISHU_API_BASE}/open-apis/im/v1/images");
-        let resp = self.client.post(&url).bearer_auth(token).multipart(form).send().await?;
-        let status = resp.status().as_u16();
-        let body = resp.text().await.unwrap_or_default();
-        if status != 200 {
-            return Err(ChannelError::ChannelRejected { status, body });
-        }
-        let parsed: Value =
-            serde_json::from_str(&body).map_err(|e| ChannelError::Other(format!("decode image response: {e}")))?;
-        let code = parsed.get("code").and_then(Value::as_i64).unwrap_or(0);
-        if code != 0 {
-            return Err(ChannelError::ChannelRejected {
-                status,
-                body: format!("code={code} body={body}"),
-            });
-        }
-        parsed
-            .get("data")
-            .and_then(|d| d.get("image_key"))
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| ChannelError::Other("missing image_key in response".into()))
-    }
-
-    /// Upload a file to Feishu and return the `file_key`.
-    async fn upload_file(
-        &self,
-        token: &str,
-        data: &[u8],
-        filename: &str,
-        content_type: &str,
-    ) -> Result<String, ChannelError> {
-        let file_type = match content_type {
-            "audio/ogg" | "audio/mpeg" | "audio/wav" => "opus",
-            "video/mp4" | "video/quicktime" => "mp4",
-            "application/pdf" => "pdf",
-            "application/msword" | "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "doc",
-            "application/vnd.ms-excel" | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xls",
-            "application/vnd.ms-powerpoint"
-            | "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "ppt",
-            _ => "stream",
-        };
-
-        let part = reqwest::multipart::Part::bytes(data.to_vec())
-            .file_name(filename.to_string())
-            .mime_str(content_type)
-            .map_err(|e| ChannelError::Other(format!("invalid mime: {e}")))?;
-        let form = reqwest::multipart::Form::new()
-            .text("file_type", file_type)
-            .text("file_name", filename.to_string())
-            .part("file", part);
-
-        let url = format!("{FEISHU_API_BASE}/open-apis/im/v1/files");
-        let resp = self.client.post(&url).bearer_auth(token).multipart(form).send().await?;
-        let status = resp.status().as_u16();
-        let body = resp.text().await.unwrap_or_default();
-        if status != 200 {
-            return Err(ChannelError::ChannelRejected { status, body });
-        }
-        let parsed: Value =
-            serde_json::from_str(&body).map_err(|e| ChannelError::Other(format!("decode file response: {e}")))?;
-        let code = parsed.get("code").and_then(Value::as_i64).unwrap_or(0);
-        if code != 0 {
-            return Err(ChannelError::ChannelRejected {
-                status,
-                body: format!("code={code} body={body}"),
-            });
-        }
-        parsed
-            .get("data")
-            .and_then(|d| d.get("file_key"))
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| ChannelError::Other("missing file_key in response".into()))
     }
 
     /// POST im/v1/messages/:id/reactions — add reaction to a message.
@@ -515,8 +428,6 @@ impl ChannelDriver for FeishuBotDriver {
             supports_card: true,
             supports_image: true,
             max_text_length: 0,
-            supports_file: true,
-            max_file_size: 30 * 1024 * 1024,
         }
     }
 
@@ -534,38 +445,6 @@ impl ChannelDriver for FeishuBotDriver {
             self.post_message(&cfg, "open_id", receive_id, "text", &json!({ "text": text }))
                 .await
         }
-    }
-
-    async fn send_file(&self, config: &Value, file: &FilePayload, caption: Option<&str>) -> Result<(), ChannelError> {
-        let cfg = Self::extract_config(config)?;
-        let receive_id = config
-            .get("defaultOpenId")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ChannelError::ConfigError("defaultOpenId required for send_file".into()))?;
-
-        let (data, filename, content_type) = resolve_to_bytes(&self.client, file).await?;
-        let ct = content_type.as_deref().unwrap_or("application/octet-stream");
-        let token = self.tenant_token(&cfg).await?;
-
-        if is_image_content_type(ct) {
-            // Upload image → get image_key → send image message
-            let image_key = self.upload_image(&token, &data, &filename).await?;
-            self.post_message(&cfg, "open_id", receive_id, "image", &json!({ "image_key": image_key }))
-                .await?;
-        } else {
-            // Upload file → get file_key → send file message
-            let file_key = self.upload_file(&token, &data, &filename, ct).await?;
-            self.post_message(&cfg, "open_id", receive_id, "file", &json!({ "file_key": file_key }))
-                .await?;
-        }
-
-        // Send caption as a follow-up text message if provided
-        if let Some(cap) = caption {
-            self.post_message(&cfg, "open_id", receive_id, "text", &json!({ "text": cap }))
-                .await?;
-        }
-
-        Ok(())
     }
 
     fn inbound(&self) -> Option<&dyn InboundDriver> {

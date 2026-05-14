@@ -69,8 +69,6 @@ impl ChannelDriver for FeishuDriver {
             supports_card: true,
             supports_image: true,
             max_text_length: 0,
-            supports_file: false,
-            max_file_size: 0,
         }
     }
 
