@@ -156,6 +156,63 @@ impl InboundDriver for TelegramBotDriver {
         ))
     }
 
+    async fn reply_file_to_user(
+        &self,
+        config: &Value,
+        _external_user_id: &str,
+        external_thread_id: &str,
+        file: &crate::file::FilePayload,
+        caption: Option<&str>,
+    ) -> Result<(), ChannelError> {
+        let cfg: TelegramConfig = serde_json::from_value(config.clone())
+            .map_err(|e| ChannelError::ConfigError(format!("invalid telegram_bot config: {e}")))?;
+        let content_type = file.content_type_hint().unwrap_or("application/octet-stream");
+        let (method, field_name) = if crate::file::is_image_content_type(content_type) {
+            ("sendPhoto", "photo")
+        } else {
+            ("sendDocument", "document")
+        };
+        let url = Self::api_url(&cfg.bot_token, method);
+
+        let resp = match file {
+            crate::file::FilePayload::Bytes {
+                data,
+                filename,
+                content_type: _,
+            } => {
+                let part = reqwest::multipart::Part::bytes(data.to_vec())
+                    .file_name(filename.clone())
+                    .mime_str(content_type)?;
+                let mut form = reqwest::multipart::Form::new()
+                    .text("chat_id", external_thread_id.to_string())
+                    .part(field_name, part);
+                if let Some(cap) = caption {
+                    form = form.text("caption", cap.to_string());
+                }
+                self.client.post(&url).multipart(form).send().await?
+            }
+            crate::file::FilePayload::Url(file_url) => {
+                let mut body = serde_json::Map::new();
+                body.insert("chat_id".to_string(), Value::String(external_thread_id.to_string()));
+                body.insert(field_name.to_string(), Value::String(file_url.clone()));
+                if let Some(cap) = caption {
+                    body.insert("caption".to_string(), Value::String(cap.to_string()));
+                }
+                self.client.post(&url).json(&Value::Object(body)).send().await?
+            }
+        };
+
+        let status = resp.status().as_u16();
+        let resp_body = resp.text().await.unwrap_or_default();
+        if status != 200 {
+            return Err(ChannelError::ChannelRejected {
+                status,
+                body: resp_body,
+            });
+        }
+        Ok(())
+    }
+
     async fn start_pump(
         &self,
         config: &Value,
