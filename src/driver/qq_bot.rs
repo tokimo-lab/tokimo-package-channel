@@ -605,6 +605,93 @@ impl InboundDriver for QqBotDriver {
         }
     }
 
+    async fn reply_file_to_user(
+        &self,
+        config: &Value,
+        external_user_id: &str,
+        _external_thread_id: &str,
+        file: &crate::file::FilePayload,
+        caption: Option<&str>,
+    ) -> Result<(), ChannelError> {
+        let cfg = Self::extract_config(config)?;
+        let file_url = match file {
+            crate::file::FilePayload::Url(url) => url,
+            crate::file::FilePayload::Bytes { .. } => {
+                return Err(ChannelError::Unsupported(
+                    "qq_bot reply_file_to_user only supports URL payloads; raw bytes not accepted".into(),
+                ));
+            }
+        };
+
+        let (scene, scope_id, user_openid) = {
+            let parts: Vec<&str> = external_user_id.splitn(3, ':').collect();
+            if parts.len() == 3 {
+                (parts[0], parts[1], parts[2])
+            } else {
+                ("c2c", "", external_user_id)
+            }
+        };
+        let token = self.access_token(&cfg).await?;
+        let (upload_path, msg_path) = if scene == "group" && !scope_id.is_empty() {
+            (
+                format!("/v2/groups/{}/files", urlencoding::encode(scope_id)),
+                format!("/v2/groups/{}/messages", urlencoding::encode(scope_id)),
+            )
+        } else {
+            (
+                format!("/v2/users/{}/files", urlencoding::encode(user_openid)),
+                format!("/v2/users/{}/messages", urlencoding::encode(user_openid)),
+            )
+        };
+
+        let upload_url = format!("{QQ_BOT_API_BASE}{upload_path}");
+        let upload_body = json!({
+            "file_type": 1,
+            "url": file_url,
+            "srv_send_msg": false,
+        });
+        let upload_resp = self
+            .client
+            .post(&upload_url)
+            .header("Authorization", format!("QQBot {token}"))
+            .header("Content-Type", "application/json")
+            .json(&upload_body)
+            .send()
+            .await?;
+        let upload_status = upload_resp.status().as_u16();
+        let upload_text = upload_resp.text().await.unwrap_or_default();
+        if upload_status != 200 {
+            return Err(ChannelError::ChannelRejected {
+                status: upload_status,
+                body: upload_text,
+            });
+        }
+        let upload_parsed: Value = serde_json::from_str(&upload_text)
+            .map_err(|e| ChannelError::Other(format!("qq_bot file upload response JSON decode failed: {e}")))?;
+        let code = upload_parsed.get("code").and_then(Value::as_i64).unwrap_or(-1);
+        if code != 0 {
+            return Err(ChannelError::ChannelRejected {
+                status: upload_status,
+                body: format!("code={code} body={upload_text}"),
+            });
+        }
+        let file_info = upload_parsed
+            .get("file_info")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ChannelError::Other("qq_bot file upload response missing file_info".into()))?;
+
+        let mut msg_body = json!({
+            "msg_type": 7,
+            "file_info": file_info,
+            "msg_seq": Self::gen_msg_seq(),
+        });
+        if let Some(caption) = caption {
+            msg_body["content"] = json!(caption);
+        }
+        self.post_v2_message(&cfg, &msg_path, &msg_body).await?;
+        Ok(())
+    }
+
     async fn reply_to_user_streaming(
         &self,
         config: &Value,

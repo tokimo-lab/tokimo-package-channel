@@ -191,4 +191,105 @@ impl InboundDriver for SlackDriver {
         }
         Ok(())
     }
+
+    async fn reply_file_to_user(
+        &self,
+        config: &Value,
+        _external_user_id: &str,
+        external_thread_id: &str,
+        file: &crate::file::FilePayload,
+        caption: Option<&str>,
+    ) -> Result<(), ChannelError> {
+        let cfg = SlackConfig::from_value(config)?;
+        let bot_token = cfg
+            .bot_token
+            .as_deref()
+            .ok_or_else(|| ChannelError::ConfigError("slack botToken required for reply_file_to_user".into()))?;
+        let (data, filename, _content_type) = crate::file::resolve_to_bytes(&self.client, file).await?;
+
+        let upload_url_api = format!("{SLACK_API_BASE}/files.getUploadURLExternal");
+        let length = data.len().to_string();
+        let resp = self
+            .client
+            .get(&upload_url_api)
+            .bearer_auth(bot_token)
+            .query(&[("filename", filename.as_str()), ("length", length.as_str())])
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        let resp_body = resp.text().await.unwrap_or_default();
+        if !(200..300).contains(&status) {
+            return Err(ChannelError::ChannelRejected {
+                status,
+                body: resp_body,
+            });
+        }
+        let parsed: Value = serde_json::from_str(&resp_body)
+            .map_err(|e| ChannelError::Other(format!("slack upload URL response JSON decode failed: {e}")))?;
+        let ok = parsed.get("ok").and_then(Value::as_bool).unwrap_or(false);
+        if !ok {
+            return Err(ChannelError::ChannelRejected {
+                status,
+                body: resp_body,
+            });
+        }
+        let upload_url = parsed
+            .get("upload_url")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ChannelError::Other("slack upload URL response missing upload_url".into()))?;
+        let file_id = parsed
+            .get("file_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ChannelError::Other("slack upload URL response missing file_id".into()))?;
+
+        let upload_resp = self
+            .client
+            .put(upload_url)
+            .header("Content-Type", "application/octet-stream")
+            .body(data.to_vec())
+            .send()
+            .await?;
+        let upload_status = upload_resp.status().as_u16();
+        if !(200..300).contains(&upload_status) {
+            let body = upload_resp.text().await.unwrap_or_default();
+            return Err(ChannelError::ChannelRejected {
+                status: upload_status,
+                body,
+            });
+        }
+
+        let complete_url = format!("{SLACK_API_BASE}/files.completeUploadExternal");
+        let mut complete_body = json!({
+            "files": [{ "id": file_id }],
+            "channel_id": external_thread_id,
+        });
+        if let Some(caption) = caption {
+            complete_body["initial_comment"] = json!(caption);
+        }
+        let complete_resp = self
+            .client
+            .post(&complete_url)
+            .bearer_auth(bot_token)
+            .json(&complete_body)
+            .send()
+            .await?;
+        let complete_status = complete_resp.status().as_u16();
+        let complete_resp_body = complete_resp.text().await.unwrap_or_default();
+        if !(200..300).contains(&complete_status) {
+            return Err(ChannelError::ChannelRejected {
+                status: complete_status,
+                body: complete_resp_body,
+            });
+        }
+        let complete_parsed: Value = serde_json::from_str(&complete_resp_body)
+            .map_err(|e| ChannelError::Other(format!("slack complete upload response JSON decode failed: {e}")))?;
+        let complete_ok = complete_parsed.get("ok").and_then(Value::as_bool).unwrap_or(false);
+        if !complete_ok {
+            return Err(ChannelError::ChannelRejected {
+                status: complete_status,
+                body: complete_resp_body,
+            });
+        }
+        Ok(())
+    }
 }

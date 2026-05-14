@@ -222,4 +222,53 @@ impl InboundDriver for DiscordDriver {
         }
         Ok(())
     }
+
+    async fn reply_file_to_user(
+        &self,
+        config: &Value,
+        _external_user_id: &str,
+        external_thread_id: &str,
+        file: &crate::file::FilePayload,
+        caption: Option<&str>,
+    ) -> Result<(), ChannelError> {
+        let cfg = DiscordConfig::from_value(config)?;
+        let bot_token = cfg
+            .bot_token
+            .as_deref()
+            .ok_or_else(|| ChannelError::ConfigError("discord botToken required to reply_file_to_user".into()))?;
+        if external_thread_id.is_empty() {
+            return Err(ChannelError::Other(
+                "discord external_thread_id (channel_id) missing".into(),
+            ));
+        }
+
+        let (data, filename, content_type) = crate::file::resolve_to_bytes(&self.client, file).await?;
+        let content_type = content_type.unwrap_or_else(|| "application/octet-stream".to_string());
+        let part = reqwest::multipart::Part::bytes(data.to_vec())
+            .file_name(filename)
+            .mime_str(&content_type)
+            .map_err(|e| ChannelError::Other(format!("invalid mime: {e}")))?;
+        let mut payload = serde_json::Map::new();
+        if let Some(caption) = caption {
+            payload.insert("content".to_string(), Value::String(caption.to_string()));
+        }
+        let form = reqwest::multipart::Form::new()
+            .part("files[0]", part)
+            .text("payload_json", Value::Object(payload).to_string());
+
+        let url = format!("{DISCORD_API_BASE}/channels/{external_thread_id}/messages");
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bot {bot_token}"))
+            .multipart(form)
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ChannelError::ChannelRejected { status, body });
+        }
+        Ok(())
+    }
 }
