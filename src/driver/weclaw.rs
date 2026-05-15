@@ -439,7 +439,12 @@ async fn send_file(
     let upload_param = request_upload_param(client, creds, kind, bytes, &aes_key, &filekey).await?;
     let ciphertext = encrypt_aes_ecb(bytes, &aes_key);
     let encrypted_query_param = upload_to_cdn(client, &upload_param, &filekey, &ciphertext).await?;
-    let aes_key_b64 = base64::engine::general_purpose::STANDARD.encode(aes_key);
+    // WeChat client expects aes_key as base64(hex_string_of_key.as_bytes()),
+    // not base64(raw_key_bytes). Verified against photon-hq/wechat-ilink-client
+    // and fooling/wechat-clawbot-gateway: both encode the 32-char hex string's
+    // UTF-8 bytes as base64 (~44 chars). Using raw 16-byte base64 (24 chars)
+    // makes WeChat see the file but fail to decrypt it on download.
+    let aes_key_b64 = base64::engine::general_purpose::STANDARD.encode(hex::encode(aes_key).as_bytes());
 
     let item = match kind {
         MediaKind::Image => serde_json::json!({
