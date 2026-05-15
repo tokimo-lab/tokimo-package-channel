@@ -446,7 +446,27 @@ async fn send_file(
     // makes WeChat see the file but fail to decrypt it on download.
     let aes_key_b64 = base64::engine::general_purpose::STANDARD.encode(hex::encode(aes_key).as_bytes());
 
-    let item = match kind {
+    let item = build_media_item(
+        kind,
+        filename,
+        bytes.len(),
+        ciphertext.len(),
+        &encrypted_query_param,
+        &aes_key_b64,
+    );
+
+    post_sendmessage(client, creds, context_token, item).await
+}
+
+fn build_media_item(
+    kind: MediaKind,
+    filename: &str,
+    bytes_len: usize,
+    cipher_len: usize,
+    encrypted_query_param: &str,
+    aes_key_b64: &str,
+) -> Value {
+    match kind {
         MediaKind::Image => serde_json::json!({
             "type": ITEM_TYPE_IMAGE,
             "image_item": {
@@ -455,7 +475,7 @@ async fn send_file(
                     "aes_key": aes_key_b64,
                     "encrypt_type": 1
                 },
-                "mid_size": ciphertext.len()
+                "mid_size": cipher_len
             }
         }),
         MediaKind::Video => serde_json::json!({
@@ -466,7 +486,7 @@ async fn send_file(
                     "aes_key": aes_key_b64,
                     "encrypt_type": 1
                 },
-                "video_size": ciphertext.len()
+                "video_size": cipher_len
             }
         }),
         MediaKind::File => serde_json::json!({
@@ -478,11 +498,18 @@ async fn send_file(
                     "encrypt_type": 1
                 },
                 "file_name": filename,
-                "len": bytes.len().to_string()
+                "len": bytes_len.to_string()
             }
         }),
-    };
+    }
+}
 
+async fn post_sendmessage(
+    client: &reqwest::Client,
+    creds: &rust_client_api::weclaw::WeclawCredentials,
+    context_token: &str,
+    item: Value,
+) -> Result<(), String> {
     let client_id = format!(
         "tokimo-weixin:{}-{:08x}",
         std::time::SystemTime::now()
@@ -539,6 +566,5 @@ async fn send_file(
             ));
         }
     }
-
     Ok(())
 }
