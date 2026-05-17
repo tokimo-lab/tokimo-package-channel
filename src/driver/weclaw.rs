@@ -297,7 +297,7 @@ impl InboundDriver for WeclawDriver {
 // --- iLink CDN file upload (encrypt → getuploadurl → upload → sendmessage) ---
 
 fn random_wechat_uin() -> String {
-    let n: u32 = rand::thread_rng().r#gen();
+    let n: u32 = rand::rng().random();
     base64::engine::general_purpose::STANDARD.encode(n.to_string())
 }
 
@@ -434,7 +434,7 @@ async fn send_file(
         .ok_or("context_token not available — user must send a message to ClawBot first")?;
 
     let filekey = Uuid::new_v4().simple().to_string();
-    let aes_key: [u8; 16] = rand::thread_rng().r#gen();
+    let aes_key: [u8; 16] = rand::rng().random();
 
     let upload_param = request_upload_param(client, creds, kind, bytes, &aes_key, &filekey).await?;
     let ciphertext = encrypt_aes_ecb(bytes, &aes_key);
@@ -516,7 +516,7 @@ async fn post_sendmessage(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis(),
-        rand::thread_rng().r#gen::<u32>()
+        rand::rng().random::<u32>()
     );
 
     let body = serde_json::json!({
