@@ -1137,9 +1137,13 @@ impl QqBotDriver {
         caption: Option<&str>,
     ) -> Result<(), ChannelError> {
         let msg_path = format!("{endpoint_base}/messages");
+        // QQ Bot v2 requires file_info to be nested inside a `media` object on
+        // msg_type=7; passing it as a top-level field is silently rejected with
+        // `304080 invalid file_info`. Verified against hermes-agent, LangBot,
+        // AstrBot, and openclaw-qqbot-formal — all four wrap as { media: { file_info } }.
         let mut msg_body = json!({
             "msg_type": 7,
-            "file_info": file_info,
+            "media": { "file_info": file_info },
             "msg_seq": Self::gen_msg_seq(),
         });
         if let Some(caption) = caption {
