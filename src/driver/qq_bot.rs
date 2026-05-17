@@ -1082,18 +1082,24 @@ impl QqBotDriver {
         }
         let parsed: Value = serde_json::from_str(&text)
             .map_err(|e| ChannelError::Other(format!("qq_bot /files response JSON decode failed: {e}")))?;
-        let code = parsed.get("code").and_then(Value::as_i64).unwrap_or(-1);
-        if code != 0 {
-            return Err(ChannelError::ChannelRejected {
-                status,
-                body: format!("code={code} body={text}"),
-            });
-        }
-        parsed
+        // QQ's /files success response is the raw media object
+        // ({file_uuid, file_info, ttl, id}) and has *no* `code` field; some
+        // edge cases (observed in the wild) return `code=-1` alongside a
+        // perfectly valid `file_info`. Treat a non-empty `file_info` as
+        // success regardless of `code`, and only fall back to the envelope's
+        // `code`/error fields when `file_info` is absent.
+        if let Some(info) = parsed
             .get("file_info")
             .and_then(Value::as_str)
-            .map(str::to_string)
-            .ok_or_else(|| ChannelError::Other("qq_bot /files response missing file_info".into()))
+            .filter(|s| !s.is_empty())
+        {
+            return Ok(info.to_string());
+        }
+        let code = parsed.get("code").and_then(Value::as_i64).unwrap_or(-1);
+        Err(ChannelError::ChannelRejected {
+            status,
+            body: format!("code={code} body={text}"),
+        })
     }
 
     /// Wrap `qq_files_endpoint_request` with bounded retry -- used for the
