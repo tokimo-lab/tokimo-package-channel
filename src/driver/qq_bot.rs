@@ -62,6 +62,14 @@ const QQ_MD5_10M_PREFIX_BYTES: usize = 10_002_432;
 /// Retry budget for individual chunk PUTs and the final `/files` complete call.
 const QQ_CHUNK_UPLOAD_MAX_RETRIES: u32 = 2;
 
+/// Parsed result of a successful `/upload_prepare` call.
+struct QqUploadPrepareResult {
+    upload_id: String,
+    global_block_size: usize,
+    parts: Vec<Value>,
+    retry_timeout_ms: u64,
+}
+
 /// Map a content-type hint to the QQ Bot v2 `file_type` enum:
 /// `1=image`, `2=video`, `3=voice`, `4=file`.
 fn infer_qq_file_type(content_type: Option<&str>) -> i32 {
@@ -874,65 +882,24 @@ impl QqBotDriver {
         .map_err(|e| ChannelError::Other(format!("qq_bot hash task panicked: {e}")))?;
 
         // 1) /upload_prepare
-        let token = self.access_token(cfg).await?;
-        let prepare_url = format!("{QQ_BOT_API_BASE}{endpoint_base}/upload_prepare");
-        let prepare_body = json!({
-            "file_type": file_type,
-            "file_name": file_name,
-            "file_size": total_size,
-            "md5": md5_hex,
-            "sha1": sha1_hex,
-            "md5_10m": md5_10m_hex,
-        });
-        let prep_resp = self
-            .client
-            .post(&prepare_url)
-            .header("Authorization", format!("QQBot {token}"))
-            .header("Content-Type", "application/json")
-            .json(&prepare_body)
-            .send()
+        let prep = self
+            .qq_upload_prepare(
+                cfg,
+                endpoint_base,
+                file_type,
+                file_name,
+                total_size,
+                &md5_hex,
+                &sha1_hex,
+                &md5_10m_hex,
+            )
             .await?;
-        let prep_status = prep_resp.status().as_u16();
-        let prep_text = prep_resp.text().await.unwrap_or_default();
-        if prep_status != 200 {
-            return Err(ChannelError::ChannelRejected {
-                status: prep_status,
-                body: prep_text,
-            });
-        }
-        let prep: Value = serde_json::from_str(&prep_text)
-            .map_err(|e| ChannelError::Other(format!("qq_bot upload_prepare JSON decode failed: {e}")))?;
-        let prep_code = prep.get("code").and_then(Value::as_i64).unwrap_or(0);
-        if prep_code != 0 {
-            let msg = if prep_code == 40_093_002 {
-                format!("qq_bot daily upload quota exceeded (code=40093002): {prep_text}")
-            } else {
-                format!("qq_bot upload_prepare failed: code={prep_code} body={prep_text}")
-            };
-            return Err(ChannelError::ChannelRejected {
-                status: prep_status,
-                body: msg,
-            });
-        }
 
-        let upload_id = prep
-            .get("upload_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ChannelError::Other("qq_bot upload_prepare missing upload_id".into()))?
-            .to_string();
-        let global_block_size = prep.get("block_size").and_then(Value::as_u64).unwrap_or(0) as usize;
-        let parts = prep
-            .get("parts")
-            .and_then(Value::as_array)
-            .ok_or_else(|| ChannelError::Other("qq_bot upload_prepare missing parts".into()))?
-            .clone();
-        let retry_timeout_ms = prep.get("retry_timeout").and_then(Value::as_u64).unwrap_or(30_000);
-
-        debug!(parts = parts.len(), total_size, "qq_bot: chunked upload starting");
+        debug!(parts = prep.parts.len(), total_size, "qq_bot: chunked upload starting");
 
         // 2) For each part: slice -> PUT presigned -> POST /upload_part_finish.
         let mut offset: usize = 0;
-        for part in &parts {
+        for part in &prep.parts {
             let part_index = part
                 .get("part_index")
                 .and_then(Value::as_i64)
@@ -946,7 +913,7 @@ impl QqBotDriver {
                 .and_then(Value::as_u64)
                 .map(|v| v as usize)
                 .filter(|&v| v > 0)
-                .unwrap_or(global_block_size);
+                .unwrap_or(prep.global_block_size);
             if block_size == 0 {
                 return Err(ChannelError::Other(
                     "qq_bot upload_prepare: block_size missing or zero".into(),
@@ -962,18 +929,87 @@ impl QqBotDriver {
             offset = end;
 
             self.qq_put_part(presigned_url, slice).await?;
-            self.qq_part_finish(cfg, endpoint_base, &upload_id, part_index, retry_timeout_ms)
+            self.qq_part_finish(cfg, endpoint_base, &prep.upload_id, part_index, prep.retry_timeout_ms)
                 .await?;
         }
 
         // 3) /files complete
         let complete_body = json!({
             "file_type": file_type,
-            "upload_id": upload_id,
+            "upload_id": prep.upload_id,
             "srv_send_msg": false,
         });
         self.qq_files_endpoint_request_with_retry(cfg, endpoint_base, &complete_body, QQ_CHUNK_UPLOAD_MAX_RETRIES)
             .await
+    }
+
+    /// POST /upload_prepare and parse the response into the fields the chunked
+    /// upload loop needs. Handles QQ's known biz error codes (40093002 = daily
+    /// quota exhausted).
+    #[allow(clippy::too_many_arguments)]
+    async fn qq_upload_prepare(
+        &self,
+        cfg: &QqBotConfig,
+        endpoint_base: &str,
+        file_type: i32,
+        file_name: &str,
+        file_size: usize,
+        md5_hex: &str,
+        sha1_hex: &str,
+        md5_10m_hex: &str,
+    ) -> Result<QqUploadPrepareResult, ChannelError> {
+        let token = self.access_token(cfg).await?;
+        let prepare_url = format!("{QQ_BOT_API_BASE}{endpoint_base}/upload_prepare");
+        let prepare_body = json!({
+            "file_type": file_type,
+            "file_name": file_name,
+            "file_size": file_size,
+            "md5": md5_hex,
+            "sha1": sha1_hex,
+            "md5_10m": md5_10m_hex,
+        });
+        let resp = self
+            .client
+            .post(&prepare_url)
+            .header("Authorization", format!("QQBot {token}"))
+            .header("Content-Type", "application/json")
+            .json(&prepare_body)
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        if status != 200 {
+            return Err(ChannelError::ChannelRejected { status, body: text });
+        }
+        let prep: Value = serde_json::from_str(&text)
+            .map_err(|e| ChannelError::Other(format!("qq_bot upload_prepare JSON decode failed: {e}")))?;
+        let code = prep.get("code").and_then(Value::as_i64).unwrap_or(0);
+        if code != 0 {
+            let msg = if code == 40_093_002 {
+                format!("qq_bot daily upload quota exceeded (code=40093002): {text}")
+            } else {
+                format!("qq_bot upload_prepare failed: code={code} body={text}")
+            };
+            return Err(ChannelError::ChannelRejected { status, body: msg });
+        }
+        let upload_id = prep
+            .get("upload_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ChannelError::Other("qq_bot upload_prepare missing upload_id".into()))?
+            .to_string();
+        let global_block_size = prep.get("block_size").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let parts = prep
+            .get("parts")
+            .and_then(Value::as_array)
+            .ok_or_else(|| ChannelError::Other("qq_bot upload_prepare missing parts".into()))?
+            .clone();
+        let retry_timeout_ms = prep.get("retry_timeout").and_then(Value::as_u64).unwrap_or(30_000);
+        Ok(QqUploadPrepareResult {
+            upload_id,
+            global_block_size,
+            parts,
+            retry_timeout_ms,
+        })
     }
 
     /// PUT a single chunk to a COS presigned URL. The presigned URL embeds
